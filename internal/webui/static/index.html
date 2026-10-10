@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8f8f6">
+  <meta name="description" content="本地大模型工作台">
+  <title>Hao Harness · 本地工作台</title>
+  <link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/" aria-label="Hao Harness 首页">
+        <img src="/assets/mark.svg" alt="" width="34" height="34">
+        <span><strong>hao harness</strong><small>LOCAL WORKSPACE</small></span>
+      </a>
+
+      <button class="new-session" id="new-session" type="button">
+        <span class="plus">＋</span> 新建对话 <kbd>⌘ K</kbd>
+      </button>
+
+      <nav class="main-nav" aria-label="主导航">
+        <a class="nav-link selected" href="#conversation"><span class="nav-icon">◷</span> 对话工作区</a>
+        <button class="nav-link" id="open-activity" type="button"><span class="nav-icon">⌁</span> 运行记录 <span class="nav-soon">即将支持</span></button>
+      </nav>
+
+      <div class="sidebar-label"><span>最近对话</span><span class="live-note">仅本次打开有效</span></div>
+      <div class="session-list" id="session-list" aria-label="最近对话"></div>
+
+      <div class="workspace-card">
+        <div class="workspace-heading"><span class="workspace-symbol">⌘</span><span>当前工作区</span><span class="workspace-dots">•••</span></div>
+        <strong>大模型服务端</strong>
+        <span class="workspace-path"><span class="green-dot"></span> hao-agent-harness</span>
+        <div class="workspace-rule"></div>
+        <div class="workspace-stat"><span>服务状态</span><span class="server-state" id="server-state"><i></i> 检查中</span></div>
+      </div>
+
+      <div class="account-area">
+        <div class="avatar">H</div>
+        <div class="account-copy"><strong>本地工作区</strong><small>请求直连当前服务</small></div>
+        <button class="icon-button settings-button" id="open-settings" type="button" aria-label="打开连接设置" title="连接设置">⚙</button>
+      </div>
+    </aside>
+
+    <main class="main-panel" id="conversation">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="crumb-separator">/</span><strong>对话</strong></div>
+        <div class="topbar-right">
+          <span class="connection-pill"><i></i><span id="connection-label">本地服务</span></span>
+          <button class="icon-button mobile-menu" id="mobile-menu" type="button" aria-label="展开侧栏">☰</button>
+          <button class="avatar mini-avatar" id="open-settings-top" type="button" aria-label="连接设置">H</button>
+        </div>
+      </header>
+
+      <section class="conversation" id="conversation-scroll" aria-live="polite">
+        <div class="welcome" id="welcome">
+          <div class="welcome-mark"><img src="/assets/mark.svg" alt="" width="48" height="48"><span class="sparkle">✳</span></div>
+          <div class="eyebrow"><i></i> PRIVATE MODEL WORKSPACE</div>
+          <h1>你好，今天想一起<br><span>完成什么？</span></h1>
+          <p class="welcome-copy">连接本地服务，与模型开始一段新的对话。<br>对话内容保留在当前页面中，刷新后清空。</p>
+
+          <div class="suggestion-grid" aria-label="试试这些任务">
+            <button class="suggestion-card" type="button" data-prompt="帮我梳理这个 Go 服务的整体架构和关键请求路径。">
+              <span class="suggestion-icon lavender">⌘</span><span><strong>梳理代码架构</strong><small>读懂服务与请求链路</small></span><span class="card-arrow">↗</span>
+            </button>
+            <button class="suggestion-card" type="button" data-prompt="帮我分析大模型 HTTP 服务的超时、并发和错误处理设计。">
+              <span class="suggestion-icon mint">⌁</span><span><strong>审阅服务设计</strong><small>检查超时与错误处理</small></span><span class="card-arrow">↗</span>
+            </button>
+            <button class="suggestion-card" type="button" data-prompt="给我一个可落地的 Go 后端重构方案，说明优先级和验证方式。">
+              <span class="suggestion-icon peach">◫</span><span><strong>规划下一步</strong><small>整理可执行的改进清单</small></span><span class="card-arrow">↗</span>
+            </button>
+            <button class="suggestion-card" type="button" data-prompt="写一段简洁、可靠的 Go HTTP 接口请求示例，并解释关键细节。">
+              <span class="suggestion-icon blue">↗</span><span><strong>开始写代码</strong><small>从一个具体问题出发</small></span><span class="card-arrow">↗</span>
+            </button>
+          </div>
+        </div>
+        <div class="message-list" id="message-list"></div>
+      </section>
+
+      <footer class="composer-area">
+        <div class="composer" id="composer">
+          <textarea id="prompt" rows="1" maxlength="24000" placeholder="描述你想解决的问题…" aria-label="消息内容"></textarea>
+          <div class="composer-toolbar">
+            <div class="composer-controls">
+              <button class="tool-button mode-button" id="mode-button" type="button" title="切换回答风格"><span>✳</span> 助手 <span class="chevron">⌄</span></button>
+              <span class="control-divider"></span>
+              <label class="model-control" for="model-select"><span class="model-dot"></span><select id="model-select" aria-label="选择模型"><option value="default">默认模型</option></select><span class="chevron">⌄</span></label>
+              <label class="stream-control" title="启用逐段返回"><input id="stream-toggle" type="checkbox" checked><span class="toggle-track"></span><span>流式输出</span></label>
+            </div>
+            <div class="send-area"><span class="shortcut-hint">Enter 发送 · Shift + Enter 换行</span><button class="send-button" id="send-button" type="button" aria-label="发送消息"><span>↑</span></button></div>
+          </div>
+        </div>
+        <p class="composer-note">AI 生成的内容请自行核验。<button id="connection-inline" type="button">管理连接与凭证</button></p>
+      </footer>
+    </main>
+  </div>
+
+  <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
+    <form method="dialog" class="dialog-top"><div class="dialog-mark"><img src="/assets/mark.svg" alt="" width="28" height="28"></div><button class="icon-button close-dialog" aria-label="关闭">×</button></form>
+    <div class="dialog-heading"><span class="eyebrow"><i></i> WORKSPACE SETTINGS</span><h2 id="settings-title">连接设置</h2><p>客户端令牌保存在当前标签页；OpenAI OAuth 令牌保存在本机用户配置目录。</p></div>
+    <label class="field-label" for="token-input">客户端访问令牌</label>
+    <div class="token-field"><input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 CLIENT_API_KEYS 中的令牌"><button type="button" id="reveal-token">显示</button></div>
+    <div class="field-help"><span class="green-dot"></span> API 地址使用当前页面的来源 <code id="api-origin"></code></div>
+    <div class="model-sync"><div><strong>模型列表</strong><small id="model-sync-status">连接后可从服务读取</small></div><button type="button" id="refresh-models" class="secondary-button">连接并加载模型</button></div>
+    <section class="oauth-login" id="openai-oauth-panel" hidden>
+      <div><strong>OpenAI 账号</strong><small id="openai-oauth-status">使用 ChatGPT 账号授权模型调用</small></div>
+      <div class="oauth-actions"><button type="button" id="openai-login" class="secondary-button">Continue with ChatGPT</button><button type="button" id="openai-logout" class="quiet-button" hidden>退出授权</button></div>
+    </section>
+    <div class="settings-error" id="settings-error" role="status"></div>
+    <div class="dialog-bottom"><button id="clear-token" type="button" class="quiet-button">清除本页凭证</button><button id="save-token" type="button" class="primary-button">保存连接</button></div>
+  </dialog>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
