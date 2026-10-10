@@ -89,6 +89,7 @@ type Config struct {
 	WriteTimeout         time.Duration
 	ShutdownTimeout      time.Duration
 	LogLevel             string
+	ChatLogDir           string
 	OpenAITokenFile      string
 	OpenAICodexTokenFile string
 }
@@ -100,6 +101,7 @@ var envPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 func Load() (Config, error) {
 	c := Config{HTTPAddr: env("HTTP_ADDR", "127.0.0.1:8080"), MetricsAddr: env("METRICS_ADDR", "127.0.0.1:9090"), LogLevel: env("LOG_LEVEL", "info"), OpenAITokenFile: os.Getenv("OPENAI_OAUTH_TOKEN_FILE")}
 	c.OpenAICodexTokenFile = os.Getenv("OPENAI_CODEX_TOKEN_FILE")
+	c.ChatLogDir = env("CHAT_LOG_DIR", "logs/requests")
 	for _, key := range strings.Split(os.Getenv("CLIENT_API_KEYS"), ",") {
 		key = strings.TrimSpace(key)
 		if key != "" {

@@ -69,6 +69,8 @@ func TestMetricsAreSeparateFromPublicAPI(t *testing.T) {
 		status int
 	}{
 		{url + "/", 200}, {url + "/assets/app.css", 200}, {url + "/assets/app.js", 200},
+		{url + "/assets/markdown.js", 200}, {url + "/assets/vendor/marked.js", 200}, {url + "/assets/vendor/purify.js", 200},
+		{url + "/assets/vendor/README.md", 404},
 		{url + "/assets/missing.js", 404}, {url + "/assets/app.js/../app.css", 404},
 		{url + "/healthz", 200}, {url + "/metrics", 404}, {metricsURL + "/metrics", 200},
 	} {

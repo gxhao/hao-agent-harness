@@ -4,6 +4,12 @@
 
 详细需求与边界见 [设计文档](docs/llm-http-server-design.md)。实现支持 Chat Completions 风格接口的一个明确子集；供应商接入前需要验证参数和流式协议兼容性。
 
+代码改动遵循先设计后执行、补全中文注释并同步文档的规范，详见 [AGENTS.md](AGENTS.md)。
+
+OpenAI Codex 的登录、凭证刷新、本地服务鉴权和故障排查见 [完整鉴权流程](docs/openai-codex-auth-flow.md)。
+
+前端 Markdown 解析、安全过滤和标签处理约定见 [前端消息渲染说明](docs/frontend-rendering.md)。
+
 ## 项目结构
 
 ```text
@@ -168,9 +174,10 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/v1/chat/completions' 
 
 - API 默认仅监听本机。生产环境通过网关提供 HTTPS，并关闭 SSE 响应缓冲、设置适当的流式空闲超时。
 - `http://127.0.0.1:9090/metrics` 输出请求量、错误分类、在途请求、耗时累计值和计数、首事件延迟及 token 用量；没有分位数或 histogram bucket。
-- 浏览器打开 `http://127.0.0.1:8080/` 可使用内置工作台；在“连接设置”输入 `CLIENT_API_KEYS` 中的令牌并加载模型。令牌放在标签页会话存储里，对话仅保留在当前页面。
+- 浏览器打开 `http://127.0.0.1:8080/` 可使用内置工作台；在“连接设置”输入 `CLIENT_API_KEYS` 中的令牌并加载模型。令牌放在标签页会话存储里，对话自动保存在当前浏览器的 localStorage，刷新或重启服务后恢复；通过“导出对话”可下载全部会话的 JSON 备份。恢复时使用同一浏览器、地址和端口。
+- 助手回复支持 Markdown 标题、粗体、列表、引用、代码块、表格和任务列表；流式输出与历史回看使用相同格式。解析与 HTML 安全过滤资源随服务打包，无需连接 CDN。用户输入仍按原文显示。
 - 指标监听器独立于公开 API，部署时限制在运维网络内。不要把未经鉴权的指标端口直接暴露公网。
-- 日志为 JSON，仅记录受控元数据，不记录客户端密钥、供应商密钥、提示词或生成内容。
+- 控制台访问日志为 JSON 元数据；会话日志默认另存到 `logs/requests/session-<会话ID>.log`。一个会话一个文件，每轮回复结束后一次追加格式化的完整请求与合并后的回复，生成过程中不写文件。前端自动传递 `X-Session-ID`，其他客户端可复用同一请求头关联多轮对话。`CHAT_LOG_DIR` 可以指定目录，设置为空可关闭详细日志。授权头和凭证不写入日志。文件说明见 [对话保存与请求日志](docs/conversation-and-logs.md)。
 - 达到容量上限立即返回 429，不排队；无自动重试或供应商自动切换。
 - 收到退出信号后停止准入，允许在途请求在宽限期内完成；超时后取消上游请求并关闭仍在运行的连接。
 - 普通响应上限为 8 MiB，SSE 单事件上限为 1 MiB；异常断流按协议错误处理。注释心跳不重置首事件或空闲计时。
@@ -191,6 +198,13 @@ go test -race -timeout 60s -coverprofile=coverage.out ./...
 ```
 
 测试覆盖请求/配置校验、鉴权与日志隐私、路由和可选参数、上游错误映射、响应大小限制、SSE 分片与多行数据、超时、取消、并发名额释放、指标隔离及优雅/强制停机。CI 执行格式检查、vet、race 测试和构建。
+
+前端 Markdown 回归测试使用 Node.js 26，覆盖普通/流式回复、历史回看、停止生成、错误保留和 HTML 安全过滤；Node.js 仅用于测试，运行服务不需要安装：
+
+```powershell
+npm ci --prefix tests/webui --ignore-scripts
+npm test --prefix tests/webui
+```
 
 ## Docker
 

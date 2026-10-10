@@ -29,6 +29,7 @@ type Options struct {
 	FirstEventTimeout time.Duration
 	StreamIdleTimeout time.Duration
 	WriteTimeout      time.Duration
+	ChatLogDir        string
 }
 
 type Handler struct {
@@ -54,9 +55,11 @@ type trace struct {
 	usage       *chat.Usage
 	first       time.Duration
 	chatRequest bool
+	log         *chatLog
 }
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
 // requestID 复用格式安全的调用方追踪 ID；输入不可信或格式不符时生成随机 ID。
 func requestID(incoming string) string {
@@ -80,6 +83,9 @@ func (h *Handler) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			t.labels.Outcome = "internal_error"
+			if t.log != nil {
+				t.log.record(errorEnvelope(chat.NewError(500, "internal_error", "服务内部错误"), t.id))
+			}
 			// The recovered value may contain credentials or user text.
 			h.logger.Error("HTTP handler panic", "request_id", t.id)
 			if w.status == 0 {
@@ -96,6 +102,14 @@ func (h *Handler) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		h.metrics.End()
 		h.metrics.Observe(t.labels, time.Since(started), t.first, t.usage, t.chatRequest)
 		h.logger.Info("http_request", "request_id", t.id, "route", t.labels.Route, "model", t.labels.Model, "provider", t.labels.Provider, "status", t.labels.Status, "outcome", t.labels.Outcome, "stream", t.labels.Stream, "duration_ms", time.Since(started).Milliseconds())
+		if t.log != nil {
+			t.log.finish(t, started)
+			if t.log.err != nil {
+				h.logger.Error("chat_log_failed", "request_id", t.id, "file", t.log.path)
+			} else {
+				h.logger.Info("chat_log_saved", "request_id", t.id, "session_id", t.log.sessionID, "file", t.log.path)
+			}
+		}
 	}()
 	t.id = requestID(r.Header.Get("X-Request-ID"))
 	w.Header().Set("X-Request-ID", t.id)
@@ -194,6 +208,17 @@ func (h *Handler) complete(w *responseWriter, r *http.Request, t *trace) {
 		return
 	}
 	var request chat.Request
+	sessionID := r.Header.Get("X-Session-ID")
+	if sessionID == "" {
+		sessionID = requestID("")
+	} else if !sessionIDPattern.MatchString(sessionID) {
+		h.fail(w, t, chat.NewError(400, "invalid_session_id", "X-Session-ID 格式无效"))
+		return
+	}
+	w.Header().Set("X-Session-ID", sessionID)
+	if h.options.ChatLogDir != "" {
+		t.log = newChatLog(h.options.ChatLogDir, sessionID, body)
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&request); err != nil {
@@ -224,6 +249,9 @@ func (h *Handler) complete(w *responseWriter, r *http.Request, t *trace) {
 		return
 	}
 	t.usage = response.Usage
+	if t.log != nil {
+		t.log.record(response)
+	}
 	if err := setWriteDeadline(w, boundedWriteTimeout(session.Context(), h.options.WriteTimeout)); err != nil {
 		t.labels.Outcome = "downstream_error"
 		return
@@ -272,6 +300,9 @@ func (h *Handler) stream(w *responseWriter, r *http.Request, t *trace, session *
 		}
 		if err != nil {
 			public := chat.PublicError(err)
+			if t.log != nil {
+				t.log.record(errorEnvelope(public, t.id))
+			}
 			t.labels.Outcome = public.Code
 			if r.Context().Err() != nil {
 				t.labels.Outcome = "client_canceled"
@@ -288,6 +319,9 @@ func (h *Handler) stream(w *responseWriter, r *http.Request, t *trace, session *
 			t.first = time.Since(started)
 		}
 		event.Model = session.Alias
+		if t.log != nil {
+			t.log.record(event)
+		}
 		if event.Usage != nil {
 			t.usage = event.Usage
 		}
@@ -328,6 +362,9 @@ func boundedWriteTimeout(ctx context.Context, limit time.Duration) time.Duration
 func (h *Handler) failContext(w *responseWriter, r *http.Request, t *trace, err error) {
 	if r.Context().Err() != nil {
 		t.labels.Outcome = "client_canceled"
+		if t.log != nil {
+			t.log.record(errorEnvelope(chat.PublicError(r.Context().Err()), t.id))
+		}
 		return
 	}
 	h.fail(w, t, err)
@@ -336,6 +373,9 @@ func (h *Handler) failContext(w *responseWriter, r *http.Request, t *trace, err 
 // fail 将内部错误映射成公开错误，并设置写入期限后发送统一 JSON 错误体。
 func (h *Handler) fail(w http.ResponseWriter, t *trace, err error) {
 	public := chat.PublicError(err)
+	if t.log != nil {
+		t.log.record(errorEnvelope(public, t.id))
+	}
 	t.labels.Outcome = public.Code
 	if err := setWriteDeadline(w, h.options.WriteTimeout); err != nil {
 		t.labels.Outcome = "downstream_error"
@@ -397,6 +437,7 @@ func (w *responseWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
+
 // Write 在尚未写状态码时按 HTTP 约定先隐式发送 200，再转发响应内容。
 func (w *responseWriter) Write(b []byte) (int, error) {
 	if w.status == 0 {

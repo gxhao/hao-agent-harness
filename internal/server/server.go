@@ -43,6 +43,12 @@ func NewWithHTTPClient(c config.Config, logger *slog.Logger, provided *http.Clie
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
+	if c.ChatLogDir != "" {
+		if err := os.MkdirAll(c.ChatLogDir, 0700); err != nil {
+			return nil, errors.New("cannot create CHAT_LOG_DIR")
+		}
+		logger.Info("chat_logging_enabled", "directory", c.ChatLogDir)
+	}
 	root, cancel := context.WithCancel(context.Background())
 	client := provider.NewHTTPClient(c.HeaderTimeout, c.MaxConcurrent)
 	if provided != nil {
@@ -97,7 +103,7 @@ func NewWithHTTPClient(c config.Config, logger *slog.Logger, provided *http.Clie
 	}
 	s := service.New(root, c.Models.Models, providers, c.MaxConcurrent, c.RequestTimeout)
 	metrics := observability.New()
-	h := httpapi.New(s, httpapi.Options{ClientKeys: c.ClientKeys, MaxRequestBytes: c.MaxRequestBytes, FirstEventTimeout: c.FirstEventTimeout, StreamIdleTimeout: c.StreamIdleTimeout, WriteTimeout: c.WriteTimeout}, logger, metrics)
+	h := httpapi.New(s, httpapi.Options{ClientKeys: c.ClientKeys, MaxRequestBytes: c.MaxRequestBytes, FirstEventTimeout: c.FirstEventTimeout, StreamIdleTimeout: c.StreamIdleTimeout, WriteTimeout: c.WriteTimeout, ChatLogDir: c.ChatLogDir}, logger, metrics)
 	app := &App{service: s, client: client, cancel: cancel, shutdownTimeout: c.ShutdownTimeout, logger: logger}
 	var oauthHandler http.Handler
 	if oauthManager != nil {

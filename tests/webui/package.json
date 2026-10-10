@@ -1,0 +1,10 @@
+{
+  "name": "hao-harness-webui-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test markdown.test.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "30.1.2"
+  }
+}

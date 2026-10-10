@@ -4,3 +4,5 @@ bin
 coverage.*
 *.exe
 *.test
+logs
+tests/webui/node_modules

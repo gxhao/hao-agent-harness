@@ -211,6 +211,7 @@ type ChatStream interface {
 | `DOWNSTREAM_WRITE_TIMEOUT` | `15s` | 每次下游写入时限 |
 | `SHUTDOWN_TIMEOUT` | `30s` | 停机等待正在处理的请求 |
 | `LOG_LEVEL` | `info` | 日志级别 |
+| `CHAT_LOG_DIR` | `logs/requests` | 会话日志目录，一会话一文件，空值关闭 |
 
 模型配置统一存储在 `configs/models.json`，提供商与模型能力的默认值见 README。API Key 模式配置示意：
 
@@ -270,7 +271,7 @@ OAuth 仅用于 OpenAI 官方公开的 Responses API 流程：上游请求设置
 
 ## 8. 安全与可观测性
 
-客户端 Token 使用恒定时间比较，支持同时配置新旧密钥进行轮换。不记录 Authorization、供应商密钥、完整请求体、提示词或生成内容。默认关闭 CORS；浏览器接入时显式配置允许的 Origin。
+客户端 Token 使用恒定时间比较，支持同时配置新旧密钥进行轮换。不记录 Authorization 或供应商凭证。控制台访问日志仅记录元数据；会话日志按 `X-Session-ID` 汇总为一个文件，每轮结束后一次追加完整请求、合并回复和最终状态，不保存逐条流式事件。`CHAT_LOG_DIR` 空值关闭会话日志。默认关闭 CORS。
 
 服务生成受控格式的 request_id；只有格式和长度校验通过的入站 ID 才能复用。响应头与错误体携带同一 ID。
 

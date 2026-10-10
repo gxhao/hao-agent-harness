@@ -44,6 +44,21 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestChatLogDirectory(t *testing.T) {
+	prepare(t, validModels)
+	dir := t.TempDir()
+	t.Setenv("CHAT_LOG_DIR", dir)
+	c, err := config.Load()
+	if err != nil || c.ChatLogDir != dir {
+		t.Fatalf("custom log directory not loaded: %v", err)
+	}
+	t.Setenv("CHAT_LOG_DIR", "")
+	c, err = config.Load()
+	if err != nil || c.ChatLogDir != "" {
+		t.Fatalf("empty log directory must disable logging: %v", err)
+	}
+}
+
 func TestLoadOpenAIOAuthProviderWithoutAPIKey(t *testing.T) {
 	oauthModels := `{"providers":{"openai":{"auth_type":"openai_oauth"}},"models":{"default":{"provider":"openai","upstream_model":"account-model","supports_stream":true,"supports_temperature":true,"supports_max_tokens":true,"max_output_tokens":4096}}}`
 	prepare(t, oauthModels)

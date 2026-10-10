@@ -56,7 +56,8 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if name != "index.html" && name != "assets/app.css" && name != "assets/app.js" && name != "assets/mark.svg" {
+	if name != "index.html" && name != "assets/app.css" && name != "assets/app.js" && name != "assets/mark.svg" &&
+		name != "assets/markdown.js" && name != "assets/vendor/marked.js" && name != "assets/vendor/purify.js" {
 		http.NotFound(w, r)
 		return
 	}

@@ -15,6 +15,7 @@
     { label: "解释", instruction: "分步骤解释问题，先给结论，再解释原因和例子。" },
   ];
   const STORAGE_KEY = "hao-harness-client-token";
+  const HISTORY_KEY = "hao-harness-conversations-v1";
   const sessions = [];
   let messages = [];
   let activeSession = null;
@@ -23,6 +24,10 @@
   let sending = false;
   let toastTimer;
   let token = "";
+  let followOutput = true;
+  let saveTimer;
+  let storageFailed = false;
+  let historyInvalid = false;
   try { token = sessionStorage.getItem(STORAGE_KEY) || ""; } catch { /* The workspace remains usable with in-memory credentials. */ }
 
   $("#api-origin").textContent = location.origin;
@@ -33,6 +38,56 @@
     ui.toast.classList.add("visible");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => ui.toast.classList.remove("visible"), 2600);
+  }
+
+  function saveSessions() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (historyInvalid) return;
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify({ version: 1, activeId: activeSession?.id, sessions }));
+      storageFailed = false;
+      $("#save-status").textContent = "已自动保存";
+      $("#save-status").classList.remove("failed");
+    } catch {
+      $("#save-status").textContent = "自动保存失败，请导出对话";
+      $("#save-status").classList.add("failed");
+      if (!storageFailed) notify("浏览器存储不可用或已满，请导出对话备份。");
+      storageFailed = true;
+    }
+  }
+
+  function scheduleSave() {
+    if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = null;saveSessions(); }, 250);
+  }
+
+  function restoreSessions() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) || "null");
+      if (!saved) return false;
+      if (saved.version !== 1 || !Array.isArray(saved.sessions)) throw new Error("invalid history");
+      for (const session of saved.sessions) {
+        if (typeof session.id !== "string" || typeof session.title !== "string" || !Array.isArray(session.messages)) throw new Error("invalid session");
+        for (const item of session.messages) {
+          if (!["user", "assistant"].includes(item.role) || typeof item.content !== "string") throw new Error("invalid message");
+          if (item.status === "pending") {
+            item.status = "interrupted";
+            item.error = "上次生成已中断，已保存收到的内容。";
+          }
+        }
+      }
+      sessions.push(...saved.sessions);
+      if (!sessions.length) return false;
+      selectSession(sessions.find((s) => s.id === saved.activeId) || sessions[0]);
+      return true;
+    } catch {
+      notify("历史记录无法读取，原始存储已保留。请先导出备份。");
+      $("#save-status").textContent = "历史读取失败，请导出备份";
+      $("#save-status").classList.add("failed");
+      storageFailed = true;
+      historyInvalid = true;
+      return false;
+    }
   }
 
   async function api(path, options = {}) {
@@ -61,14 +116,14 @@
       if (!response.ok) throw new Error("offline");
       state.classList.add("online");
       state.classList.remove("offline");
-      state.innerHTML = "<i></i> 正常运行";
+      setServerStatus(state, "正常运行");
       badge.classList.add("connected");
       badge.classList.remove("disconnected");
       $("#connection-label").textContent = "服务已就绪";
     } catch {
       state.classList.add("offline");
       state.classList.remove("online");
-      state.innerHTML = "<i></i> 暂不可用";
+      setServerStatus(state, "暂不可用");
       badge.classList.add("disconnected");
       badge.classList.remove("connected");
       $("#connection-label").textContent = "服务未连接";
@@ -132,6 +187,20 @@
     $("#connection-label").textContent = ui.model.value || "本地服务";
   }
 
+  // 状态提示直接创建 DOM 节点，避免手写标签字符串在后续修改时漏掉闭合标签。
+  function setServerStatus(node, message) {
+    const indicator = document.createElement("i");
+    node.replaceChildren(indicator, document.createTextNode(` ${message}`));
+  }
+
+  // 等待动画的三个圆点分别创建成节点，让文字变化不会重新解析 HTML。
+  function setMessageState(node, message) {
+    const dots = document.createElement("span");
+    dots.className = "typing-dots";
+    dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+    node.replaceChildren(dots, document.createTextNode(` ${message}`));
+  }
+
   function openSettings() {
     ui.token.value = token;
     ui.settingsError.textContent = "";
@@ -162,6 +231,7 @@
     if (role === "user") {
       row.append(body);
     } else {
+      renderMarkdown(body, text);
       const avatar = document.createElement("span");
       avatar.className = "message-avatar";
       const icon = document.createElement("img");
@@ -213,6 +283,8 @@
     ui.prompt.focus();
     ui.shell.classList.remove("sidebar-open");
     renderHistory();
+    if (!storageFailed) saveSessions();
+    scrollToBottom(true);
   }
 
   function selectSession(session) {
@@ -221,21 +293,30 @@
     messages = session.messages;
     ui.list.replaceChildren();
     ui.welcome.hidden = messages.length > 0;
-    for (const item of messages) addMessage(item.role, item.content);
+    for (const item of messages) {
+      const message = addMessage(item.role, item.content);
+      if (item.error) renderError(message.body, item.error);
+    }
     ui.shell.classList.remove("sidebar-open");
     renderHistory();
-    scrollToBottom();
+    saveSessions();
+    scrollToBottom(true);
   }
 
-  function scrollToBottom() {
-    requestAnimationFrame(() => { ui.scroll.scrollTop = ui.scroll.scrollHeight; });
+  function scrollToBottom(force = false) {
+    if (force) followOutput = true;
+    if (!followOutput) return;
+    requestAnimationFrame(() => { if (followOutput) ui.scroll.scrollTop = ui.scroll.scrollHeight; });
   }
 
   function updateComposer() {
     ui.send.classList.toggle("stop", sending);
     ui.send.setAttribute("aria-label", sending ? "停止生成" : "发送消息");
     ui.send.title = sending ? "停止生成" : "发送消息";
-    ui.send.innerHTML = sending ? "<span class=\"stop-square\">■</span>" : "<span>↑</span>";
+    const icon = document.createElement("span");
+    icon.textContent = sending ? "■" : "↑";
+    if (sending) icon.className = "stop-square";
+    ui.send.replaceChildren(icon);
     $("#composer").classList.toggle("is-sending", sending);
   }
 
@@ -257,6 +338,9 @@
     if (!token) { openSettings();ui.settingsError.textContent = "先添加客户端访问令牌，再发送消息。";return; }
     if (messages.length >= 199) { notify("此对话已达到消息数上限，请新建对话。");return; }
     if (!activeSession) newSession();
+    // Keep the response attached to its originating session if the user switches.
+    const sessionMessages = activeSession.messages;
+    const sessionID = activeSession.id;
 
     ui.welcome.hidden = true;
     ui.prompt.value = "";
@@ -264,53 +348,72 @@
     activeSession.title = activeSession.title === "新对话" ? text.slice(0, 32) : activeSession.title;
     renderHistory();
     addMessage("user", text);
-    messages.push({ role: "user", content: text });
+    sessionMessages.push({ role: "user", content: text });
+    const requestMessages = [{ role: "system", content: MODES[modeIndex].instruction },
+      ...sessionMessages.filter((item) => item.content && (!item.status || item.status === "complete"))
+        .map(({ role, content }) => ({ role, content }))];
+    const draft = { role: "assistant", content: "", status: "pending" };
+    sessionMessages.push(draft);
+    saveSessions();
+    scrollToBottom(true);
     const assistant = addMessage("assistant", "");
     const state = document.createElement("span");
     state.className = "message-state";
-    state.innerHTML = "<span class=\"typing-dots\"><i></i><i></i><i></i></span> 正在连接模型";
+    setMessageState(state, "正在连接模型");
     assistant.body.after(state);
 
     sending = true;
     controller = new AbortController();
     updateComposer();
-    const accumulated = { value: "" };
-    let streamFailed = false;
+    const accumulated = {
+      get value() { return draft.content; },
+      set value(value) { draft.content = value;scheduleSave(); },
+    };
+    const useStream = ui.stream.checked;
     try {
-      const requestMessages = [{ role: "system", content: MODES[modeIndex].instruction }, ...messages];
       const response = await api("/v1/chat/completions", {
         method: "POST",
+        headers: { "X-Session-ID": sessionID },
         signal: controller.signal,
-        body: JSON.stringify({ model: ui.model.value || "default", messages: requestMessages, stream: ui.stream.checked }),
+        body: JSON.stringify({ model: ui.model.value || "default", messages: requestMessages, stream: useStream }),
       });
-      if (!ui.stream.checked) {
+      draft.request_id = response.headers.get("X-Request-ID") || "";
+      if (!useStream) {
         const result = await response.json();
         accumulated.value = result.choices?.[0]?.message?.content || "";
         state.remove();
-        assistant.body.textContent = accumulated.value || "模型没有返回文本内容。";
+        renderMarkdown(assistant.body, accumulated.value);
       } else {
-        state.innerHTML = "<span class=\"typing-dots\"><i></i><i></i><i></i></span> 正在生成";
+        setMessageState(state, "正在生成");
         await readStream(response, accumulated, assistant.body, state, controller.signal);
       }
-      if (accumulated.value) messages.push({ role: "assistant", content: accumulated.value });
-      else if (!streamFailed) renderError(assistant.body, "模型没有返回文本内容。");
+      draft.status = accumulated.value ? "complete" : "error";
+      if (!accumulated.value) {
+        draft.error = "模型没有返回文本内容。";
+        renderError(assistant.body, draft.error);
+      }
     } catch (error) {
-      streamFailed = true;
+      draft.status = error.name === "AbortError" ? "stopped" : "error";
       if (error.name === "AbortError") {
         if (accumulated.value) {
-          messages.push({ role: "assistant", content: accumulated.value });
-          renderError(assistant.body, "已停止生成。部分回复不会用于后续对话。");
-        } else assistant.row.remove();
+          draft.error = "已停止生成。部分回复不会用于后续对话。";
+          renderError(assistant.body, draft.error);
+        } else {
+          assistant.row.remove();
+          sessionMessages.splice(sessionMessages.indexOf(draft), 1);
+        }
       } else {
         if (error.status === 401) {
           token = "";
           try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* Keep the rejected token out of memory. */ }
         }
-        renderError(assistant.body, error.message || "发生连接错误，请检查本地服务设置。");
+        draft.error = error.message || "发生连接错误，请检查本地服务设置。";
+        renderError(assistant.body, draft.error);
         if (error.status === 401) notify("访问令牌无效，请更新连接凭证");
       }
     } finally {
       state.remove();
+      saveSessions();
       sending = false;
       controller = null;
       updateComposer();
@@ -325,6 +428,12 @@
     const decoder = new TextDecoder();
     let pending = "";
     let ended = false;
+    let renderFrame = null;
+    function renderOutput() {
+      renderFrame = null;
+      renderMarkdown(target, output.value);
+      scrollToBottom();
+    }
     function processEvent(raw) {
       const data = raw.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
       if (!data) return;
@@ -336,9 +445,8 @@
       for (const choice of event.choices || []) {
         if (typeof choice.delta?.content === "string") {
           output.value += choice.delta.content;
-          target.textContent = output.value;
-          state.innerHTML = "<span class=\"typing-dots\"><i></i><i></i><i></i></span> 正在生成";
-          scrollToBottom();
+          if (renderFrame === null) renderFrame = requestAnimationFrame(renderOutput);
+          setMessageState(state, "正在生成");
         }
       }
     }
@@ -363,6 +471,8 @@
       try { await reader.cancel(error); } catch { /* Preserve the original stream error. */ }
       throw error;
     } finally {
+      if (renderFrame !== null) cancelAnimationFrame(renderFrame);
+      renderOutput();
       reader.releaseLock();
     }
   }
@@ -374,7 +484,12 @@
 
   function cycleMode() {
     modeIndex = (modeIndex + 1) % MODES.length;
-    $("#mode-button").innerHTML = `<span>✳</span> ${MODES[modeIndex].label} <span class="chevron">⌄</span>`;
+    const symbol = document.createElement("span");
+    symbol.textContent = "✳";
+    const chevron = document.createElement("span");
+    chevron.className = "chevron";
+    chevron.textContent = "⌄";
+    $("#mode-button").replaceChildren(symbol, document.createTextNode(` ${MODES[modeIndex].label} `), chevron);
     notify(`已切换为${MODES[modeIndex].label}风格`);
   }
 
@@ -477,7 +592,23 @@
     if (savedModel) ui.model.value = savedModel;
   } catch { /* Private browsing can disable persistent preferences. */ }
 
-  newSession();
+  ui.scroll.addEventListener("scroll", () => {
+    followOutput = ui.scroll.scrollHeight - ui.scroll.clientHeight - ui.scroll.scrollTop < 80;
+    $("#jump-bottom").hidden = followOutput;
+  });
+  $("#jump-bottom").addEventListener("click", () => { scrollToBottom(true);$("#jump-bottom").hidden = true; });
+  $("#export-session").addEventListener("click", () => {
+    let value = JSON.stringify({ version: 1, activeId: activeSession?.id, sessions }, null, 2);
+    if (historyInvalid) {
+      try { value = localStorage.getItem(HISTORY_KEY) || value; } catch { /* Export in-memory messages. */ }
+    }
+    const url = URL.createObjectURL(new Blob([value], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;link.download = `hao-conversations-${new Date().toISOString().slice(0, 10)}.json`;link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  window.addEventListener("pagehide", () => { if (!storageFailed) saveSessions(); });
+  if (!restoreSessions()) newSession();
   refreshStatus();
   if (token) loadModels();
 })();

@@ -7,3 +7,5 @@
 /openai-codex.json
 *.exe
 *.test
+/tests/webui/node_modules/
+/logs/
