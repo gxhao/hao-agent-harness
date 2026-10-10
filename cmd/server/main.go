@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,6 +18,18 @@ func main() { os.Exit(run()) }
 
 // run 负责加载配置、初始化结构化日志，并把系统终止信号转换成可取消的 context。
 func run() int {
+	options, err := parseOptions(os.Args[1:], os.Stderr)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if options.login != "" {
+		return runLogin(ctx, options, os.Stdin, os.Stdout)
+	}
 	bootstrap := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	c, err := config.Load()
 	if err != nil {
@@ -33,8 +47,6 @@ func run() int {
 		logger.Error("initialization_failed", "error", err.Error())
 		return 1
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	if err := app.Run(ctx); err != nil {
 		logger.Error("server_failed", "error", err.Error())
 		return 1

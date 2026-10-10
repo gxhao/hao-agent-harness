@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -19,6 +20,46 @@ type tokenSource struct {
 }
 
 func (s tokenSource) AccessToken(context.Context) (string, error) { return s.token, s.err }
+
+type codexTokenSource struct{ tokenSource }
+
+func (codexTokenSource) AccountID() string { return "account-one" }
+
+func TestOpenAICodexUsesSubscriptionEndpointAndInstructions(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "https://chatgpt.com/backend-api/codex/responses" || r.Header.Get("Authorization") != "Bearer access" || r.Header.Get("ChatGPT-Account-Id") != "account-one" || r.Header.Get("OpenAI-Beta") != "responses=experimental" {
+			t.Fatal("incorrect Codex endpoint or headers")
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["instructions"] != "system prompt" || body["store"] != false || body["stream"] != true || len(body["input"].([]any)) != 2 {
+			t.Fatalf("incorrect Codex body: %v", body)
+		}
+		if _, exists := body["max_output_tokens"]; exists {
+			t.Fatal("unsupported max_output_tokens sent")
+		}
+		if body["temperature"] != float64(0) {
+			t.Fatal("zero temperature lost")
+		}
+		events := strings.ReplaceAll(responseEvents, "response.completed", "response.done")
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(events)), Request: r}, nil
+	})}
+	p := provider.NewOpenAICodex(client, codexTokenSource{tokenSource{token: "access"}})
+	zero := 0.0
+	response, err := p.Complete(context.Background(), chat.Request{Model: "codex", Temperature: &zero, Messages: []chat.Message{{Role: "system", Content: "system prompt"}, {Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Choices[0].Message.Content != "hello world" {
+		t.Fatalf("Codex completion: %#v", response)
+	}
+	limit := 12
+	if _, err := p.Complete(context.Background(), chat.Request{Model: "codex", MaxTokens: &limit}); err == nil || chat.PublicError(err).Code != "unsupported_parameter" {
+		t.Fatalf("unsupported limit: %v", err)
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -97,5 +138,74 @@ func TestOpenAIResponsesRequiresOAuthAndVerifiedCompletion(t *testing.T) {
 	p = provider.NewOpenAIResponses(client, tokenSource{token: "oauth-access"})
 	if _, err := p.Complete(context.Background(), chat.Request{Model: "gpt-test"}); err == nil || chat.PublicError(err).Code != "upstream_protocol_error" {
 		t.Fatalf("expected protocol error for missing completion event, got %v", err)
+	}
+}
+
+func TestCodexSSEWithoutContentType(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", streaming), func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(responseEvents)), Request: r}, nil
+			})}
+			p := provider.NewOpenAICodex(client, codexTokenSource{tokenSource{token: "access"}})
+			request := chat.Request{Model: "codex", Messages: []chat.Message{{Role: "user", Content: "hi"}}}
+			if !streaming {
+				response, err := p.Complete(context.Background(), request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if response.Choices[0].Message.Content != "hello world" {
+					t.Fatal("text was not aggregated")
+				}
+				return
+			}
+			stream, err := p.Stream(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			completed := false
+			for {
+				event, err := stream.Next(context.Background())
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(event.Choices) > 0 && event.Choices[0].FinishReason != nil {
+					completed = true
+				}
+			}
+			if !completed {
+				t.Fatal("completion event missing")
+			}
+		})
+	}
+}
+
+func TestCodexMissingHeaderDoesNotAcceptInvalidStreams(t *testing.T) {
+	for _, tc := range []struct {
+		name, media, body string
+		codex             bool
+	}{
+		{"ordinary-oauth-stays-strict", "", responseEvents, false},
+		{"explicit-html-rejected", "text/html", responseEvents, true},
+		{"missing-header-html-rejected", "", "<html>not an event stream</html>", true},
+		{"missing-header-json-rejected", "", "data: invalid JSON\n\n", true},
+		{"missing-completion-rejected", "", strings.ReplaceAll(responseEvents, "response.completed", "response.unknown"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{tc.media}}, Body: io.NopCloser(strings.NewReader(tc.body)), Request: r}, nil
+			})}
+			p := provider.NewOpenAIResponses(client, tokenSource{token: "access"})
+			if tc.codex {
+				p = provider.NewOpenAICodex(client, codexTokenSource{tokenSource{token: "access"}})
+			}
+			if _, err := p.Complete(context.Background(), chat.Request{Model: "test"}); err == nil || chat.PublicError(err).Code != "upstream_protocol_error" {
+				t.Fatalf("expected protocol failure, got %v", err)
+			}
+		})
 	}
 }

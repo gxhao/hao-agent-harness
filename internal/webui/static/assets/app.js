@@ -111,6 +111,12 @@
         ? `已授权${status.email ? `：${status.email}` : ""}`
         : "使用 ChatGPT 账号授权模型调用";
       $("#openai-login").textContent = status.connected ? "重新授权当前账号" : "Continue with ChatGPT";
+      $("#openai-login").hidden = Boolean(status.cli_login);
+      if (status.cli_login) {
+        $("#openai-oauth-status").textContent = status.connected
+          ? "OpenAI Codex 已授权"
+          : "请停止服务，使用 server --login openai 登录后重新启动";
+      }
       $("#openai-logout").hidden = !status.connected;
       return status.connected;
     } catch (error) {
@@ -310,7 +316,6 @@
       updateComposer();
       ui.prompt.focus();
       scrollToBottom();
-      refreshStatus();
     }
   }
 
@@ -475,5 +480,4 @@
   newSession();
   refreshStatus();
   if (token) loadModels();
-  setInterval(refreshStatus, 30000);
 })();

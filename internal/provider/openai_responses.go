@@ -25,6 +25,15 @@ type OAuthTokenSource interface {
 type OpenAIResponses struct {
 	client *http.Client
 	tokens OAuthTokenSource
+	codex  interface{ AccountID() string }
+}
+
+// NewOpenAICodex sends subscription credentials to the Codex backend used by pi.
+func NewOpenAICodex(client *http.Client, tokens interface {
+	OAuthTokenSource
+	AccountID() string
+}) *OpenAIResponses {
+	return &OpenAIResponses{client: client, tokens: tokens, codex: tokens}
 }
 
 // NewOpenAIResponses 创建固定请求 OpenAI 官方 Responses API 地址的 provider。
@@ -33,6 +42,7 @@ func NewOpenAIResponses(client *http.Client, tokens OAuthTokenSource) *OpenAIRes
 }
 
 type responsesRequest struct {
+	Instructions    *string        `json:"instructions,omitempty"`
 	Model           string         `json:"model"`
 	Input           []chat.Message `json:"input"`
 	Stream          bool           `json:"stream"`
@@ -63,20 +73,51 @@ func (p *OpenAIResponses) send(ctx context.Context, request chat.Request) (*http
 	if err != nil {
 		return nil, chat.NewError(503, "oauth_login_required", "请先完成 OpenAI 账号授权")
 	}
-	body, err := json.Marshal(responsesRequest{
+	payload := responsesRequest{
 		Model: request.Model, Input: request.Messages, Stream: true, Store: false,
 		Temperature: request.Temperature, MaxOutputTokens: request.MaxTokens,
-	})
+	}
+	endpoint := openAIResponsesURL
+	if p.codex != nil {
+		if request.MaxTokens != nil {
+			return nil, chat.NewError(400, "unsupported_parameter", "Codex 不支持 max_tokens")
+		}
+		endpoint = "https://chatgpt.com/backend-api/codex/responses"
+		instructions := []string{}
+		payload.Input = make([]chat.Message, 0, len(request.Messages))
+		for _, message := range request.Messages {
+			if message.Role == "system" {
+				instructions = append(instructions, message.Content)
+			} else {
+				payload.Input = append(payload.Input, message)
+			}
+		}
+		text := strings.Join(instructions, "\n\n")
+		if text == "" {
+			text = "You are a helpful assistant."
+		}
+		payload.Instructions = &text
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, chat.NewError(500, "internal_error", "服务内部错误")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIResponsesURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, chat.NewError(500, "internal_error", "服务内部错误")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	if p.codex != nil {
+		account := p.codex.AccountID()
+		if account == "" || strings.ContainsAny(account, "\r\n") {
+			return nil, chat.NewError(503, "oauth_login_required", "请使用 --login 重新登录 OpenAI")
+		}
+		req.Header.Set("ChatGPT-Account-Id", account)
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("Originator", "hao-agent-harness")
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, transportError(ctx, err)
@@ -88,7 +129,10 @@ func (p *OpenAIResponses) send(ctx context.Context, request chat.Request) (*http
 		}
 		return nil, chat.NewError(502, "upstream_error", "大模型服务调用失败")
 	}
-	if !contentType(resp.Header.Get("Content-Type"), "text/event-stream") {
+	// Codex can return a valid SSE body without Content-Type. pi consumes that
+	// stream directly; still validate every event and require a completion event.
+	mediaType := resp.Header.Get("Content-Type")
+	if !contentType(mediaType, "text/event-stream") && !(p.codex != nil && mediaType == "") {
 		resp.Body.Close()
 		return nil, protocolError()
 	}
@@ -213,13 +257,16 @@ func (s *responsesStream) Next(ctx context.Context) (chat.Event, error) {
 					return chat.Event{}, protocolError()
 				}
 				return textEvent(s.id, s.model, s.created, event.Delta, nil, nil), nil
-			case "response.completed", "response.incomplete":
+			case "response.completed", "response.incomplete", "response.done":
 				s.setResponse(event.Response)
 				if s.id == "" || s.created <= 0 {
 					return chat.Event{}, protocolError()
 				}
 				finish := "stop"
-				if event.Type == "response.incomplete" {
+				if event.Response.Status == "failed" || event.Response.Status == "cancelled" {
+					return chat.Event{}, chat.NewError(502, "upstream_error", "大模型服务流式响应失败")
+				}
+				if event.Type == "response.incomplete" || event.Response.Status == "incomplete" {
 					finish = "length"
 				}
 				s.done = true

@@ -35,6 +35,7 @@ const (
 
 // Manager 管理一个本机 ChatGPT OAuth 账号及会轮换的访问凭证。
 type Manager struct {
+	codex   bool
 	mu      sync.Mutex
 	path    string
 	name    string
@@ -45,6 +46,7 @@ type Manager struct {
 }
 
 type credentials struct {
+	AccountID    string    `json:"account_id,omitempty"`
 	ClientID     string    `json:"client_id"`
 	HostID       string    `json:"ext_agent_host_id"`
 	Subject      string    `json:"subject"`
@@ -159,6 +161,10 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 // start 为这次登录生成 state、nonce 和 PKCE verifier，返回给浏览器打开的授权地址。
 func (m *Manager) start(w http.ResponseWriter, r *http.Request) {
+	if m.codex {
+		http.Error(w, "Use server --login openai to connect this Codex provider", http.StatusBadRequest)
+		return
+	}
 	callback, err := loopbackCallback(r.Host)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -291,7 +297,7 @@ func (m *Manager) status(w http.ResponseWriter) {
 	connected := m.token.AccessToken != "" && m.token.RefreshToken != ""
 	email := m.token.Email
 	m.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"connected": connected, "email": email})
+	writeJSON(w, http.StatusOK, map[string]any{"connected": connected, "email": email, "cli_login": m.codex})
 }
 
 // logout 清除本地令牌并尝试向 OpenAI 撤销 refresh token；远端未确认时会提示用户。
@@ -301,6 +307,7 @@ func (m *Manager) logout(w http.ResponseWriter, r *http.Request) {
 	clientID := m.token.ClientID
 	m.token.AccessToken, m.token.RefreshToken, m.token.IDToken = "", "", ""
 	m.token.Email, m.token.Subject, m.token.Scopes = "", "", ""
+	m.token.AccountID = ""
 	m.token.ExpiresAt = time.Time{}
 	err := m.saveLocked()
 	m.mu.Unlock()
@@ -308,7 +315,7 @@ func (m *Manager) logout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not clear OpenAI credentials", http.StatusInternalServerError)
 		return
 	}
-	if refresh != "" {
+	if refresh != "" && !m.codex {
 		form := url.Values{"token": {refresh}, "token_type_hint": {"refresh_token"}, "client_id": {clientID}}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -332,6 +339,9 @@ func (m *Manager) logout(w http.ResponseWriter, r *http.Request) {
 
 // AccessToken 返回可用的 Bearer 令牌，并用互斥锁串行刷新，避免重复消费轮换令牌。
 func (m *Manager) AccessToken(ctx context.Context) (string, error) {
+	if m.codex {
+		return m.codexAccessToken(ctx)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.token.RefreshToken == "" {
@@ -360,7 +370,11 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 
 // tokenRequest 发送表单编码的 OAuth 请求，只接受有大小上限的成功 JSON 响应。
 func (m *Manager) tokenRequest(ctx context.Context, form url.Values, out *tokenReply) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	endpoint := tokenURL
+	if m.codex {
+		endpoint = codexTokenURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -390,8 +404,17 @@ func (m *Manager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(m.path), ".oauth-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	if err := os.Chmod(tmp, 0600); err != nil {

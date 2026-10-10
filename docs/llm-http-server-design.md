@@ -198,9 +198,10 @@ type ChatStream interface {
 | `HTTP_ADDR` | `127.0.0.1:8080` | 监听地址；容器按部署需要覆盖 |
 | `METRICS_ADDR` | `127.0.0.1:9090` | 独立指标监听地址；空字符串关闭 |
 | `CLIENT_API_KEYS` | 必填 | 本服务允许的客户端 Token，支持轮换重叠期 |
-| `MODEL_CONFIG_PATH` | 必填 | 模型别名、Provider、真实模型与能力配置 |
-| `UPSTREAM_API_KEY_<NAME>` | 按 Provider 必填 | 各供应商密钥 |
+| `MODEL_CONFIG_PATH` | `configs/models.json` | 唯一模型配置文件的默认路径；可显式覆盖 |
+| `UPSTREAM_API_KEY_<NAME>` | API Key Provider 必填 | 各供应商密钥 |
 | `OPENAI_OAUTH_TOKEN_FILE` | 用户配置目录默认路径 | OpenAI OAuth access/refresh token 文件 |
+| `OPENAI_CODEX_TOKEN_FILE` | 用户配置目录默认路径 | 命令行 Codex 登录及服务共用的凭证文件 |
 | `MAX_REQUEST_BYTES` | `1048576` | 请求体上限 |
 | `MAX_CONCURRENT_REQUESTS` | `64` | 单实例并发上限，流式占用到连接结束 |
 | `REQUEST_TIMEOUT` | `120s` | 普通及流式请求的总时限 |
@@ -211,7 +212,7 @@ type ChatStream interface {
 | `SHUTDOWN_TIMEOUT` | `30s` | 停机等待正在处理的请求 |
 | `LOG_LEVEL` | `info` | 日志级别 |
 
-模型配置示意（字段为本项目设计，后续实现时固定 schema）：
+模型配置统一存储在 `configs/models.json`，提供商与模型能力的默认值见 README。API Key 模式配置示意：
 
 ```json
 {
@@ -253,6 +254,8 @@ OpenAI OAuth provider 使用固定配置，不接受自定义上游地址或 API
 ```
 
 OAuth 仅用于 OpenAI 官方公开的 Responses API 流程：上游请求设置 `stream:true` 和 `store:false`，再将 `response.output_text.delta` 转为本服务的 Chat Completions 风格 SSE。普通下游请求由服务聚合内部流。首次授权通过 loopback callback 使用 PKCE，并验证 state、nonce、签名、issuer、audience、过期时间和 `chatgpt.tokens.use.direct` scope。凭证以限制权限的文件原子写入；刷新时整体替换 access token 与轮换后的 refresh token。授权回调和控制端点只允许本机访问，启动、状态和退出操作还需要本服务客户端令牌。
+
+默认的 `openai_codex` provider 使用独立的命令行 OAuth 流程（`--login`），请求固定的 `https://chatgpt.com/backend-api/codex/responses` 并携带账号 ID。模型项仅需 `provider` 和 `upstream_model`；默认开启 stream，关闭 temperature 和 max_tokens，因此不要求输出上限。API Key 和网页 OAuth 模式默认开启这些能力，输出上限默认为 4096；显式配置可覆盖默认值。
 
 启动时校验密钥、URL、模型引用和所有数值配置；无效则直接退出。上游地址由运维固定，默认要求 HTTPS，不接受用户输入地址。HTTP Client 禁止跟随重定向，防止携带凭证转发到其他主机。配置修改通过重启生效，初版不提供热加载。
 

@@ -57,6 +57,112 @@ func TestLoadOpenAIOAuthProviderWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoadOpenAICodexProvider(t *testing.T) {
+	models := `{"providers":{"openai":{"auth_type":"openai_codex"}},"models":{"default":{"provider":"openai","upstream_model":"codex-model","supports_stream":true,"supports_max_tokens":false,"max_output_tokens":4096}}}`
+	prepare(t, models)
+	t.Setenv("UPSTREAM_API_KEY_PRIMARY", "")
+	t.Setenv("OPENAI_CODEX_TOKEN_FILE", "custom-codex.json")
+	c, err := config.Load()
+	if err != nil || c.OpenAICodexTokenFile != "custom-codex.json" {
+		t.Fatalf("Codex config: %#v, %v", c, err)
+	}
+	for _, invalid := range []string{
+		strings.Replace(models, `"auth_type":"openai_codex"`, `"auth_type":"openai_codex","chat_url":"https://example.com"`, 1),
+		strings.Replace(models, `"supports_max_tokens":false`, `"supports_max_tokens":true`, 1),
+	} {
+		prepare(t, invalid)
+		if _, err := config.Load(); err == nil {
+			t.Fatal("accepted unsupported Codex configuration")
+		}
+	}
+}
+
+func TestLoadDefaultsToLocalModelsAndHonorsExplicitPath(t *testing.T) {
+	models := `{"providers":{"openai":{"auth_type":"openai_codex"}},"models":{"default":{"provider":"openai","upstream_model":"test-codex","supports_stream":true,"max_output_tokens":4096}}}`
+	prepare(t, models)
+	explicitPath := os.Getenv("MODEL_CONFIG_PATH")
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("configs", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("configs/models.json", []byte(models), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Unsetenv("MODEL_CONFIG_PATH"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load()
+	if err != nil || c.Models.Providers["openai"].AuthType != "openai_codex" {
+		t.Fatalf("default local config: %v", err)
+	}
+	t.Setenv("MODEL_CONFIG_PATH", explicitPath)
+	if _, err := config.Load(); err != nil {
+		t.Fatalf("explicit config: %v", err)
+	}
+	t.Setenv("MODEL_CONFIG_PATH", "missing.json")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("silently ignored explicit missing configuration")
+	}
+	t.Setenv("MODEL_CONFIG_PATH", "")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("accepted explicitly empty configuration path")
+	}
+	os.Unsetenv("MODEL_CONFIG_PATH")
+	t.Setenv("CLIENT_API_KEYS", "")
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "CLIENT_API_KEYS") {
+		t.Fatalf("missing client authentication: %v", err)
+	}
+	t.Setenv("CLIENT_API_KEYS", "client-secret")
+	if err := os.Remove("configs/models.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "create configs/models.json") {
+		t.Fatalf("missing default config: %v", err)
+	}
+}
+
+func TestMinimalModelDefaultsAndExplicitOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, fields         string
+		stream, temperature, maxTokens bool
+		limit                          int
+	}{
+		{"codex", `{"auth_type":"openai_codex"}`, "", true, false, false, 0},
+		{"oauth", `{"auth_type":"openai_oauth"}`, "", true, true, true, 4096},
+		{"api-key", `{"chat_url":"https://llm.example.com/v1/chat/completions","api_key_env":"UPSTREAM_API_KEY_PRIMARY"}`, "", true, true, true, 4096},
+		{"explicit-false", `{"auth_type":"openai_oauth"}`, `,"supports_stream":false,"supports_temperature":false,"supports_max_tokens":false`, false, false, false, 0},
+		{"explicit-limit", `{"auth_type":"openai_oauth"}`, `,"max_output_tokens":1024`, true, true, true, 1024},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepare(t, `{"providers":{"p":`+tc.provider+`},"models":{"default":{"provider":"p","upstream_model":"test-model"`+tc.fields+`}}}`)
+			c, err := config.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := c.Models.Models["default"]
+			if m.SupportsStream != tc.stream || m.SupportsTemperature != tc.temperature || m.SupportsMaxTokens != tc.maxTokens || m.MaxOutputTokens != tc.limit {
+				t.Fatalf("incorrect defaults: %#v", m)
+			}
+		})
+	}
+}
+
+func TestCanonicalConfigurationLoadsWithoutProviderAPIKey(t *testing.T) {
+	b, err := os.ReadFile("../../configs/models.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare(t, string(b))
+	t.Setenv("UPSTREAM_API_KEY_PRIMARY", "")
+	c, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Models.Providers["openai"].AuthMethod() != "openai_codex" || c.Models.Models["default"].SupportsMaxTokens {
+		t.Fatal("canonical config must use Codex defaults")
+	}
+}
+
 func TestInvalidConfigurationDoesNotExposeSecrets(t *testing.T) {
 	for _, tc := range []struct{ name, env, value, json string }{
 		{name: "missing clients", env: "CLIENT_API_KEYS", value: ""},
@@ -76,6 +182,8 @@ func TestInvalidConfigurationDoesNotExposeSecrets(t *testing.T) {
 		{name: "trailing object", json: validModels + `{}`},
 		{name: "null", json: `null`},
 		{name: "empty", json: `{}`},
+		{name: "zero max token limit", json: strings.ReplaceAll(validModels, `"max_output_tokens":4096`, `"max_output_tokens":0`)},
+		{name: "negative max token limit", json: strings.ReplaceAll(validModels, `"max_output_tokens":4096`, `"max_output_tokens":-1`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := tc.json

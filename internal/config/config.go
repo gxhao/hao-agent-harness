@@ -22,6 +22,45 @@ type Provider struct {
 	APIKey    string `json:"-"`
 }
 
+// AuthMethod keeps the API-key default consistent for loaded and programmatic configs.
+func (p Provider) AuthMethod() string {
+	if p.AuthType == "" {
+		return "api_key"
+	}
+	return p.AuthType
+}
+
+// modelDefinition preserves omitted fields so explicit false values remain effective.
+type modelDefinition struct {
+	Provider            string `json:"provider"`
+	UpstreamModel       string `json:"upstream_model"`
+	SupportsStream      *bool  `json:"supports_stream"`
+	SupportsTemperature *bool  `json:"supports_temperature"`
+	SupportsMaxTokens   *bool  `json:"supports_max_tokens"`
+	MaxOutputTokens     *int   `json:"max_output_tokens"`
+}
+
+func (d modelDefinition) model(p Provider) Model {
+	m := Model{Provider: d.Provider, UpstreamModel: d.UpstreamModel, SupportsStream: true,
+		SupportsTemperature: p.AuthMethod() != "openai_codex", SupportsMaxTokens: p.AuthMethod() != "openai_codex"}
+	if d.SupportsStream != nil {
+		m.SupportsStream = *d.SupportsStream
+	}
+	if d.SupportsTemperature != nil {
+		m.SupportsTemperature = *d.SupportsTemperature
+	}
+	if d.SupportsMaxTokens != nil {
+		m.SupportsMaxTokens = *d.SupportsMaxTokens
+	}
+	if m.SupportsMaxTokens {
+		m.MaxOutputTokens = 4096
+	}
+	if d.MaxOutputTokens != nil {
+		m.MaxOutputTokens = *d.MaxOutputTokens
+	}
+	return m
+}
+
 type Model struct {
 	Provider            string `json:"provider"`
 	UpstreamModel       string `json:"upstream_model"`
@@ -37,20 +76,21 @@ type Models struct {
 }
 
 type Config struct {
-	HTTPAddr          string
-	MetricsAddr       string
-	ClientKeys        []string
-	Models            Models
-	MaxRequestBytes   int64
-	MaxConcurrent     int
-	RequestTimeout    time.Duration
-	HeaderTimeout     time.Duration
-	FirstEventTimeout time.Duration
-	StreamIdleTimeout time.Duration
-	WriteTimeout      time.Duration
-	ShutdownTimeout   time.Duration
-	LogLevel          string
-	OpenAITokenFile   string
+	HTTPAddr             string
+	MetricsAddr          string
+	ClientKeys           []string
+	Models               Models
+	MaxRequestBytes      int64
+	MaxConcurrent        int
+	RequestTimeout       time.Duration
+	HeaderTimeout        time.Duration
+	FirstEventTimeout    time.Duration
+	StreamIdleTimeout    time.Duration
+	WriteTimeout         time.Duration
+	ShutdownTimeout      time.Duration
+	LogLevel             string
+	OpenAITokenFile      string
+	OpenAICodexTokenFile string
 }
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
@@ -59,6 +99,7 @@ var envPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 // Load 从环境变量和模型 JSON 文件构造配置；密钥只从指定环境变量读取，不写入日志或错误文本。
 func Load() (Config, error) {
 	c := Config{HTTPAddr: env("HTTP_ADDR", "127.0.0.1:8080"), MetricsAddr: env("METRICS_ADDR", "127.0.0.1:9090"), LogLevel: env("LOG_LEVEL", "info"), OpenAITokenFile: os.Getenv("OPENAI_OAUTH_TOKEN_FILE")}
+	c.OpenAICodexTokenFile = os.Getenv("OPENAI_CODEX_TOKEN_FILE")
 	for _, key := range strings.Split(os.Getenv("CLIENT_API_KEYS"), ",") {
 		key = strings.TrimSpace(key)
 		if key != "" {
@@ -94,13 +135,13 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("%s must be a positive duration", spec.name)
 		}
 	}
-	path := os.Getenv("MODEL_CONFIG_PATH")
+	path := env("MODEL_CONFIG_PATH", "configs/models.json")
 	if path == "" {
 		return c, fmt.Errorf("MODEL_CONFIG_PATH is required")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return c, fmt.Errorf("cannot open model configuration")
+		return c, fmt.Errorf("cannot open model configuration; set MODEL_CONFIG_PATH or create configs/models.json")
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
@@ -109,17 +150,25 @@ func Load() (Config, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c.Models); err != nil {
+	var definitions struct {
+		Providers map[string]Provider        `json:"providers"`
+		Models    map[string]modelDefinition `json:"models"`
+	}
+	if err := dec.Decode(&definitions); err != nil {
 		return c, fmt.Errorf("invalid model configuration JSON")
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return c, fmt.Errorf("model configuration must contain one JSON object")
 	}
+	c.Models = Models{Providers: definitions.Providers, Models: make(map[string]Model, len(definitions.Models))}
 	for name, p := range c.Models.Providers {
 		if p.APIKeyEnv != "" {
 			p.APIKey = os.Getenv(p.APIKeyEnv)
 		}
 		c.Models.Providers[name] = p
+	}
+	for name, definition := range definitions.Models {
+		c.Models.Models[name] = definition.model(c.Models.Providers[definition.Provider])
 	}
 	return c, c.Validate()
 }
@@ -165,22 +214,19 @@ func (c Config) Validate() error {
 		if !namePattern.MatchString(name) {
 			return fmt.Errorf("invalid provider name or key environment variable")
 		}
-		if p.AuthType == "" {
-			p.AuthType = "api_key"
-		}
-		switch p.AuthType {
+		switch p.AuthMethod() {
 		case "api_key":
 			if !envPattern.MatchString(p.APIKeyEnv) {
 				return fmt.Errorf("provider %s requires a valid api_key_env", name)
 			}
-		case "openai_oauth":
+		case "openai_oauth", "openai_codex":
 			if p.APIKeyEnv != "" || p.ChatURL != "" {
-				return fmt.Errorf("provider %s openai_oauth uses the fixed Responses API and does not accept chat_url or api_key_env", name)
+				return fmt.Errorf("provider %s %s uses a fixed Responses API and does not accept chat_url or api_key_env", name, p.AuthType)
 			}
 		default:
 			return fmt.Errorf("provider %s has an unsupported auth_type", name)
 		}
-		if p.AuthType == "openai_oauth" {
+		if p.AuthMethod() != "api_key" {
 			continue
 		}
 		u, err := url.Parse(p.ChatURL)
@@ -198,8 +244,11 @@ func (c Config) Validate() error {
 		if _, ok := c.Models.Providers[m.Provider]; !ok {
 			return fmt.Errorf("model %s references unknown provider", name)
 		}
-		if m.MaxOutputTokens <= 0 {
-			return fmt.Errorf("model %s requires positive max_output_tokens", name)
+		if c.Models.Providers[m.Provider].AuthType == "openai_codex" && m.SupportsMaxTokens {
+			return fmt.Errorf("model %s openai_codex does not support max_tokens; set supports_max_tokens to false", name)
+		}
+		if m.MaxOutputTokens < 0 || m.SupportsMaxTokens && m.MaxOutputTokens == 0 {
+			return fmt.Errorf("model %s requires positive max_output_tokens when max_tokens is supported", name)
 		}
 	}
 	return nil

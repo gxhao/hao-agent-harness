@@ -1,6 +1,5 @@
 .git
 .env
-configs/models.json
 bin
 coverage.*
 *.exe

@@ -3,7 +3,7 @@
 /coverage
 /coverage.html
 /.env
-/configs/models.json
 /openai-oauth.json
+/openai-codex.json
 *.exe
 *.test

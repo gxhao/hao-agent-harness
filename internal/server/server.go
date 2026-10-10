@@ -51,11 +51,9 @@ func NewWithHTTPClient(c config.Config, logger *slog.Logger, provided *http.Clie
 	}
 	providers := make(map[string]chat.Provider, len(c.Models.Providers))
 	var oauthManager *openaioauth.Manager
+	var codexManager *openaioauth.Manager
 	for name, p := range c.Models.Providers {
-		authType := p.AuthType
-		if authType == "" {
-			authType = "api_key"
-		}
+		authType := p.AuthMethod()
 		if authType == "openai_oauth" {
 			if oauthManager == nil {
 				path := c.OpenAITokenFile
@@ -77,6 +75,24 @@ func NewWithHTTPClient(c config.Config, logger *slog.Logger, provided *http.Clie
 			providers[name] = provider.NewOpenAIResponses(client, oauthManager)
 			continue
 		}
+		if authType == "openai_codex" {
+			if codexManager == nil {
+				path := c.OpenAICodexTokenFile
+				var err error
+				if path == "" {
+					path, err = openaioauth.CodexTokenPath()
+				}
+				if err == nil {
+					codexManager, err = openaioauth.NewCodex(path, client, c.ClientKeys)
+				}
+				if err != nil {
+					cancel()
+					return nil, err
+				}
+			}
+			providers[name] = provider.NewOpenAICodex(client, codexManager)
+			continue
+		}
 		providers[name] = provider.NewCompatible(client, p.ChatURL, p.APIKey)
 	}
 	s := service.New(root, c.Models.Models, providers, c.MaxConcurrent, c.RequestTimeout)
@@ -86,6 +102,8 @@ func NewWithHTTPClient(c config.Config, logger *slog.Logger, provided *http.Clie
 	var oauthHandler http.Handler
 	if oauthManager != nil {
 		oauthHandler = oauthManager.Handler()
+	} else if codexManager != nil {
+		oauthHandler = codexManager.Handler()
 	}
 	app.HTTP = &http.Server{Addr: c.HTTPAddr, Handler: webui.New(h, oauthHandler), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10, BaseContext: func(net.Listener) context.Context { return root }, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError)}
 	if c.MetricsAddr != "" {
