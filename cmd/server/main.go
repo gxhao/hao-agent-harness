@@ -25,12 +25,18 @@ func run() int {
 		}
 		return 2
 	}
+	bootstrap := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// 两个入口共用当前目录的 .env，确保登录保存和服务读取使用同一凭证路径。
+	// 参数错误和帮助已提前返回；文件只补充环境，不覆盖部署时显式注入的值。
+	if err := config.LoadDotEnv(".env"); err != nil {
+		bootstrap.Error("configuration_failed", "error", err.Error())
+		return 1
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if options.login != "" {
 		return runLogin(ctx, options, os.Stdin, os.Stdout)
 	}
-	bootstrap := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	c, err := config.Load()
 	if err != nil {
 		bootstrap.Error("configuration_failed", "error", err.Error())

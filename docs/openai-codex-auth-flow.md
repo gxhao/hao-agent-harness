@@ -15,7 +15,7 @@
 
 | 对象 | 用途 | 存储及使用方式 |
 | --- | --- | --- |
-| `CLIENT_API_KEYS` | 控制谁能访问本服务 | 从启动进程的环境变量读取；支持逗号分隔的多个令牌 |
+| `CLIENT_API_KEYS` | 控制谁能访问本服务 | 从启动进程的环境变量读取；当前目录 `.env` 补充未设置的变量；支持逗号分隔的多个令牌 |
 | OAuth `access_token` | 代表已登录账号调用 Codex | 从凭证文件读取，由服务端放入上游认证头 |
 | OAuth `refresh_token` | 换取新的访问令牌 | 只用于服务端的刷新请求，不发给工作台 |
 | `account_id` | 指定对应的 ChatGPT 账号 | 提取自访问令牌，发送为 `ChatGPT-Account-Id` |
@@ -71,7 +71,7 @@ go run ./cmd/server
 
 `default` 是客户端使用的模型别名，`upstream_model` 是发给上游的模型 ID。请使用账号可调用的真实 ID，不要填写界面展示名称。Codex 配置默认开启流式能力，关闭 temperature 和 max_tokens，因此无需填写 `max_output_tokens`。
 
-启动后打开 `http://127.0.0.1:8080/`，在连接设置中填写与启动时 `CLIENT_API_KEYS` 相同的值，再加载模型和发送消息。变更环境变量或配置文件后需要重启；程序不会自动加载 `.env` 文件。
+启动后打开 `http://127.0.0.1:8080/`，在连接设置中填写与启动时 `CLIENT_API_KEYS` 相同的值，再加载模型和发送消息。服务和 `--login` 都自动加载当前工作目录的 `.env`，已有环境变量优先（包括显式空值）。因此也可把 `CLIENT_API_KEYS` 和可选的 `OPENAI_CODEX_TOKEN_FILE` 写入 `.env`，无需逐次在终端设置。登录与启动应使用同一工作目录或显式设置同一凭证路径。变更环境变量、`.env` 或模型配置后需要重启。文件不存在时允许继续，读取或格式错误时退出；格式、大小限制及排错见 [README](../README.md#本地运行) 和 [.env 加载设计](dotenv-loading-design.md)。
 
 ## 3. 登录入口与参数
 
@@ -401,7 +401,7 @@ Invoke-WebRequest 'http://127.0.0.1:8080/auth/openai/logout' -Method Post -Heade
 本地自动化验证不需要真实账号：
 
 ```powershell
-go test -timeout 60s ./cmd/server ./tests/config ./tests/openaioauth ./tests/provider ./tests/server
+go test -timeout 60s ./tests/cmd/server ./tests/config ./tests/openaioauth ./tests/provider ./tests/server
 go vet ./...
 ```
 

@@ -44,6 +44,31 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// 模拟入口先加载 .env 再加载配置，确认客户端令牌和供应商密钥进入各自字段。
+func TestLoadWithDotEnvCredentials(t *testing.T) {
+	prepare(t, validModels)
+	// prepare 已通过 t.Setenv 注册环境恢复，清除后可验证文件补充的行为。
+	for _, name := range []string{"CLIENT_API_KEYS", "UPSTREAM_API_KEY_PRIMARY"} {
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("CLIENT_API_KEYS=file-client\nUPSTREAM_API_KEY_PRIMARY=file-provider\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.LoadDotEnv(path); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.ClientKeys) != 1 || c.ClientKeys[0] != "file-client" || c.Models.Providers["primary"].APIKey != "file-provider" {
+		t.Fatal("dotenv credentials were not loaded into their separate configuration fields")
+	}
+}
+
 func TestChatLogDirectory(t *testing.T) {
 	prepare(t, validModels)
 	dir := t.TempDir()

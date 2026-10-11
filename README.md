@@ -53,7 +53,11 @@ export CLIENT_API_KEYS='your-client-token'
 go run ./cmd/server
 ```
 
-`.env.example` 只用于展示环境变量；程序不会自动读取 `.env`。密钥在启动时从环境读取，不写入模型配置文件。供应商地址必须为固定 HTTPS 地址，禁止 URL 内嵌凭证、查询参数和重定向。
+服务启动和 `--login` 都会自动加载**当前工作目录**的 `.env`。已有进程环境变量优先（包括显式空值），文件只补充未设置的变量。已有 `.env` 时，配置好 `CLIENT_API_KEYS` 后可直接执行 `go run ./cmd/server`，无需再在 PowerShell 中设置同名变量。首次配置可复制 `.env.example` 为 `.env` 并替换示例令牌；不要覆盖已有文件。
+
+`.env` 支持 `KEY=value`、可选 `export` 前缀、空值、单行单/双引号、空行和 `#` 注释。双引号支持 `\\`、`\"`、`\n`、`\r`、`\t` 转义；Windows 路径建议用单引号或 `/`。未加引号时，只有行首或空白后的 `#` 才表示注释。不展开 `$VAR` / `${VAR}`，不执行命令，不支持跨行值。文件内重复变量以最后一次为准。支持 CRLF 和 UTF-8 BOM。
+
+文件不存在时继续使用进程环境；读取失败、超过 1 MiB 或格式错误时以 `configuration_failed` 退出，格式错误包含行号但不包含配置值。修正文件后重新启动；`.env` 不会热加载，也不会搜索父目录或加载 `.env.local`。详细规则见 [.env 加载设计](docs/dotenv-loading-design.md)。`.env` 已被 Git 忽略，密钥不写入模型配置文件。供应商地址必须为固定 HTTPS 地址，禁止 URL 内嵌凭证、查询参数和重定向。
 
 ## 命令行 OAuth 登录（参考 pi）
 
@@ -184,6 +188,8 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/v1/chat/completions' 
 
 ## 验证与构建
 
+测试文件统一放在根目录 `tests/`：`internal/<模块>/` 对应 `tests/<模块>/`，`cmd/<命令>/` 对应 `tests/cmd/<命令>/`；生产目录不放测试文件。配置加载测试位于 `tests/config/`，命令行入口测试位于 `tests/cmd/server/`，通过公开接口和实际程序行为验证，无需导出私有函数。
+
 ```sh
 gofmt -w cmd internal tests
 go vet ./...
@@ -198,6 +204,8 @@ go test -race -timeout 60s -coverprofile=coverage.out ./...
 ```
 
 测试覆盖请求/配置校验、鉴权与日志隐私、路由和可选参数、上游错误映射、响应大小限制、SSE 分片与多行数据、超时、取消、并发名额释放、指标隔离及优雅/强制停机。CI 执行格式检查、vet、race 测试和构建。
+
+命令行测试会编译一次临时可执行文件，并在隔离工作目录中验证参数、退出码和 `.env` 加载顺序，不需要真实账号或网络请求。若 Windows Defender 或执行策略阻止该程序启动，测试会明确报告启动失败；这属于环境阻断，不能视为测试通过。仅验证本次配置和命令行改动可执行 `go test -timeout 60s ./tests/config ./tests/cmd/server`。
 
 前端 Markdown 回归测试使用 Node.js 26，覆盖普通/流式回复、历史回看、停止生成、错误保留和 HTML 安全过滤；Node.js 仅用于测试，运行服务不需要安装：
 
