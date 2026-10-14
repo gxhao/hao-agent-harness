@@ -6,7 +6,7 @@
     shell: $(".app-shell"), list: $("#message-list"), history: $("#session-list"),
     welcome: $("#welcome"), scroll: $("#conversation-scroll"), prompt: $("#prompt"),
     send: $("#send-button"), model: $("#model-select"), stream: $("#stream-toggle"),
-    dialog: $("#settings-dialog"), token: $("#token-input"), settingsError: $("#settings-error"),
+    dialog: $("#settings-dialog"), settingsError: $("#settings-error"),
     modelStatus: $("#model-sync-status"), toast: $("#toast"),
   };
   const MODES = [
@@ -14,7 +14,6 @@
     { label: "代码", instruction: "优先提供能直接使用的代码，并说明必要的实现细节。" },
     { label: "解释", instruction: "分步骤解释问题，先给结论，再解释原因和例子。" },
   ];
-  const STORAGE_KEY = "hao-harness-client-token";
   const HISTORY_KEY = "hao-harness-conversations-v1";
   const sessions = [];
   let messages = [];
@@ -23,15 +22,11 @@
   let controller = null;
   let sending = false;
   let toastTimer;
-  let token = "";
   let followOutput = true;
   let saveTimer;
   let storageFailed = false;
   let historyInvalid = false;
-  try { token = sessionStorage.getItem(STORAGE_KEY) || ""; } catch { /* The workspace remains usable with in-memory credentials. */ }
-
   $("#api-origin").textContent = location.origin;
-  $("#token-input").value = token;
 
   function notify(message) {
     ui.toast.textContent = message;
@@ -92,7 +87,6 @@
 
   async function api(path, options = {}) {
     const headers = new Headers(options.headers || {});
-    if (token) headers.set("Authorization", `Bearer ${token}`);
     if (options.body) headers.set("Content-Type", "application/json");
     const response = await fetch(path, { ...options, headers });
     if (!response.ok) {
@@ -202,24 +196,10 @@
   }
 
   function openSettings() {
-    ui.token.value = token;
     ui.settingsError.textContent = "";
     ui.dialog.showModal();
-    if (token) void refreshOAuthStatus();
-  }
-
-  function acceptToken() {
-    const next = ui.token.value.trim();
-    if (!next || /\s/.test(next)) {
-      ui.settingsError.textContent = "请输入有效的客户端访问令牌。";
-      ui.token.focus();
-      return false;
-    }
-    try { sessionStorage.setItem(STORAGE_KEY, next); }
-    catch { ui.settingsError.textContent = "浏览器没有开启会话存储，请允许此页面使用会话存储。";return false; }
-    token = next;
-    ui.settingsError.textContent = "";
-    return true;
+    void refreshOAuthStatus();
+    void loadModels();
   }
 
   function addMessage(role, text) {
@@ -335,7 +315,6 @@
     if (sending) { stopResponse();return; }
     const text = ui.prompt.value.trim();
     if (!text) { ui.prompt.focus();return; }
-    if (!token) { openSettings();ui.settingsError.textContent = "先添加客户端访问令牌，再发送消息。";return; }
     if (messages.length >= 199) { notify("此对话已达到消息数上限，请新建对话。");return; }
     if (!activeSession) newSession();
     // Keep the response attached to its originating session if the user switches.
@@ -403,13 +382,8 @@
           sessionMessages.splice(sessionMessages.indexOf(draft), 1);
         }
       } else {
-        if (error.status === 401) {
-          token = "";
-          try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* Keep the rejected token out of memory. */ }
-        }
         draft.error = error.message || "发生连接错误，请检查本地服务设置。";
         renderError(assistant.body, draft.error);
-        if (error.status === 401) notify("访问令牌无效，请更新连接凭证");
       }
     } finally {
       state.remove();
@@ -508,18 +482,8 @@
     updateConnectionLabel();
   });
   for (const selector of ["#open-settings", "#open-settings-top", "#connection-inline"]) $(selector).addEventListener("click", openSettings);
-  $("#save-token").addEventListener("click", () => {
-    if (acceptToken()) void connectAndClose();
-  });
-  async function connectAndClose() {
-    if (await loadModels()) {
-      ui.dialog.close();
-      notify("服务连接成功，凭证保存在当前标签页");
-    }
-  }
-  $("#refresh-models").addEventListener("click", () => { if (acceptToken()) void loadModels(); });
+  $("#refresh-models").addEventListener("click", () => { void loadModels(); });
   $("#openai-login").addEventListener("click", async () => {
-    if (!acceptToken()) return;
     const popup = window.open("about:blank", "openai-oauth", "popup,width=560,height=760");
     try {
       const response = await api("/auth/openai/start", { method: "POST" });
@@ -553,21 +517,7 @@
       $("#openai-oauth-status").textContent = error.message;
     }
   });
-  $("#clear-token").addEventListener("click", () => {
-    token = "";
-    ui.token.value = "";
-    try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* The in-memory value is also cleared. */ }
-    ui.modelStatus.textContent = "凭证已清除";
-    ui.settingsError.textContent = "";
-    ui.model.replaceChildren(new Option("默认模型", "default"));
-    ui.dialog.close();
-    notify("已清除当前标签页的凭证");
-  });
-  $("#reveal-token").addEventListener("click", (event) => {
-    const visible = ui.token.type === "password";
-    ui.token.type = visible ? "text" : "password";
-    event.currentTarget.textContent = visible ? "隐藏" : "显示";
-  });
+  $("#close-settings").addEventListener("click", () => ui.dialog.close());
   $("#mobile-menu").addEventListener("click", () => ui.shell.classList.toggle("sidebar-open"));
   $("#open-activity").addEventListener("click", () => notify("运行记录将在后续版本开放。"));
   for (const card of document.querySelectorAll(".suggestion-card")) {
@@ -610,5 +560,5 @@
   window.addEventListener("pagehide", () => { if (!storageFailed) saveSessions(); });
   if (!restoreSessions()) newSession();
   refreshStatus();
-  if (token) loadModels();
+  loadModels();
 })();

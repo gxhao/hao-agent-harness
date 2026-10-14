@@ -45,7 +45,7 @@ func newFixture(t *testing.T, upstream http.HandlerFunc, capacity int, modify fu
 	s := service.New(root, map[string]config.Model{"default": {Provider: "primary", UpstreamModel: "real-model", SupportsStream: true, SupportsTemperature: true, SupportsMaxTokens: true, MaxOutputTokens: 4096}}, map[string]chat.Provider{"primary": provider.NewCompatible(client, u.URL, "upstream-secret")}, capacity, 2*time.Second)
 	metrics := observability.New()
 	logs := &bytes.Buffer{}
-	opts := httpapi.Options{ClientKeys: []string{"client-secret", "rotated-secret"}, MaxRequestBytes: 1024, FirstEventTimeout: time.Second, StreamIdleTimeout: time.Second, WriteTimeout: time.Second}
+	opts := httpapi.Options{MaxRequestBytes: 1024, FirstEventTimeout: time.Second, StreamIdleTimeout: time.Second, WriteTimeout: time.Second}
 	if modify != nil {
 		modify(&opts)
 	}
@@ -71,8 +71,6 @@ func TestRequestContract(t *testing.T) {
 		name, body, method, path, auth, media, code string
 		status                                      int
 	}{
-		{name: "missing auth", body: requestJSON, auth: "missing", status: 401, code: "unauthorized"},
-		{name: "wrong auth", body: requestJSON, auth: "Bearer wrong", status: 401, code: "unauthorized"},
 		{name: "wrong media", body: requestJSON, media: "text/plain", status: 415, code: "unsupported_media_type"},
 		{name: "invalid JSON", body: `{`, status: 400, code: "invalid_request"},
 		{name: "unknown field", body: strings.Replace(requestJSON, `"model"`, `"unsupported":true,"model"`, 1), status: 400, code: "invalid_request"},
@@ -130,6 +128,27 @@ func TestRequestContract(t *testing.T) {
 	f.metrics.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
 	if strings.Contains(w.Body.String(), "untrusted-random-model") || strings.Contains(w.Body.String(), "arbitrary-user-path") {
 		t.Fatal("untrusted high cardinality metric label")
+	}
+}
+
+func TestClientAuthorizationIsNotRequiredOrValidated(t *testing.T) {
+	var calls atomic.Int64
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); success(w, r) }, 8, nil)
+	for _, authorization := range []string{"", "Bearer invalid", "Basic anything"} {
+		r := request(http.MethodPost, "/v1/chat/completions", requestJSON)
+		if authorization == "" {
+			r.Header.Del("Authorization")
+		} else {
+			r.Header.Set("Authorization", authorization)
+		}
+		w := httptest.NewRecorder()
+		f.handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("authorization %q returned %d: %s", authorization, w.Code, w.Body.String())
+		}
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("upstream calls=%d; want 3", calls.Load())
 	}
 }
 

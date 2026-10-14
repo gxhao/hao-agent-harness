@@ -5,6 +5,7 @@
 /.env
 /openai-oauth.json
 /openai-codex.json
+/credentials/
 *.exe
 *.test
 /tests/webui/node_modules/

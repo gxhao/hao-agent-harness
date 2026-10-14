@@ -27,9 +27,9 @@ func TestServerUsesPersistedCodexCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := config.Config{
-		HTTPAddr: "127.0.0.1:0", ClientKeys: []string{"client-secret"}, OpenAICodexTokenFile: path,
+		HTTPAddr: "127.0.0.1:0", MetricsAddr: "",
 		Models: config.Models{
-			Providers: map[string]config.Provider{"openai": {AuthType: "openai_codex"}},
+			Providers: map[string]config.Provider{"openai": {AuthType: "openai_codex", CodexTokenFile: path}},
 			Models:    map[string]config.Model{"default": {Provider: "openai", UpstreamModel: "codex-model", SupportsStream: true, MaxOutputTokens: 4096}},
 		},
 		MaxRequestBytes: 4096, MaxConcurrent: 4, RequestTimeout: time.Second, HeaderTimeout: time.Second,

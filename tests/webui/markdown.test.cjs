@@ -13,7 +13,6 @@ function fixture(t, chat, saved) {
   const w = dom.window;
   w.Headers = Headers;
   w.TextDecoder = TextDecoder;
-  w.sessionStorage.setItem("hao-harness-client-token", "test-token");
   if (saved) w.localStorage.setItem("hao-harness-conversations-v1", saved);
   w.fetch = async (url, options) => {
     if (url === "/v1/chat/completions") return chat(options);
@@ -46,6 +45,7 @@ test("JSON replies and history render GFM while user text and request history st
   const markdown = '# 标题\n\n**粗体** 与 *斜体* ~~删除~~ `inline`\n\n> 引用\n\n1. 有序\n\n- [x] 完成\n- 列表\n\n```go\nfmt.Println("<tag>")\n```\n\n| 名称 | 值 |\n| --- | --- |\n| a | b |\n\n[官网](https://example.com)';
   const requests = [];
   const w = fixture(t, (options) => {
+    assert.equal(new Headers(options.headers).has("Authorization"), false, "browser requests must not attach a client key");
     requests.push(JSON.parse(options.body));
     return Response.json({ choices: [{ message: { content: markdown } }] });
   });
@@ -140,7 +140,6 @@ test("saved conversations restore after page restart and remain usable as contex
   await waitFor(() => idle(first));
   const saved = first.localStorage.getItem(historyKey);
   assert.ok(saved.includes("保存的回复"));
-  assert.ok(!saved.includes("test-token"));
   let request;
   const restored = fixture(t, (options) => {
     sessionIDs.push(options.headers.get("X-Session-ID"));

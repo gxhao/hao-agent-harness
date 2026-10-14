@@ -29,7 +29,7 @@ func (f oauthRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestOAuthStartRequiresLocalAuthenticatedOriginAndUsesPKCE(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "openai-oauth.json")
-	manager, err := openaioauth.New(path, "hao-agent-harness", http.DefaultClient, []string{"client-secret"})
+	manager, err := openaioauth.New(path, "hao-agent-harness", http.DefaultClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,17 +64,17 @@ func TestOAuthStartRequiresLocalAuthenticatedOriginAndUsesPKCE(t *testing.T) {
 	}
 }
 
-func TestOAuthControlAndCallbackAreLoopbackOnly(t *testing.T) {
-	manager, err := openaioauth.New(filepath.Join(t.TempDir(), "tokens.json"), "hao-agent-harness", http.DefaultClient, []string{"client-secret"})
+func TestOAuthControlIsUnauthenticatedButLoopbackOnly(t *testing.T) {
+	manager, err := openaioauth.New(filepath.Join(t.TempDir(), "tokens.json"), "hao-agent-harness", http.DefaultClient)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Run("control endpoint requires bearer token", func(t *testing.T) {
+	t.Run("control endpoint works without bearer token", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/auth/openai/status", nil)
 		r.RemoteAddr = "127.0.0.1:12345"
 		w := httptest.NewRecorder()
 		manager.Handler().ServeHTTP(w, r)
-		if w.Code != http.StatusUnauthorized {
+		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d", w.Code)
 		}
 	})
@@ -91,11 +91,11 @@ func TestOAuthControlAndCallbackAreLoopbackOnly(t *testing.T) {
 
 func TestCredentialFileContainsStableHostIDAndNoTokensBeforeLogin(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "tokens.json")
-	_, err := openaioauth.New(path, "hao-agent-harness", http.DefaultClient, []string{"client-secret"})
+	_, err := openaioauth.New(path, "hao-agent-harness", http.DefaultClient)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := openaioauth.New(path, "hao-agent-harness", http.DefaultClient, []string{"client-secret"})
+	second, err := openaioauth.New(path, "hao-agent-harness", http.DefaultClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestOAuthCallbackVerifiesIdentityAndRefreshesRotatingToken(t *testing.T) {
 		}
 	})}
 	path := filepath.Join(t.TempDir(), "credentials.json")
-	manager, err := openaioauth.New(path, "hao-agent-harness", client, []string{"client-secret"})
+	manager, err := openaioauth.New(path, "hao-agent-harness", client)
 	if err != nil {
 		t.Fatal(err)
 	}

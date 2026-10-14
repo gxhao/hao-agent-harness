@@ -63,7 +63,7 @@ func TestCodexManualLoginPersistsAndRefreshesOnce(t *testing.T) {
 		return oauthResponse(r, "application/json", b), nil
 	})}
 	path := filepath.Join(t.TempDir(), "nested", "codex.json")
-	manager, err := openaioauth.NewCodex(path, client, nil)
+	manager, err := openaioauth.NewCodex(path, client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestCodexManualLoginPersistsAndRefreshesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := openaioauth.NewCodex(path, client, nil)
+	reloaded, err := openaioauth.NewCodex(path, client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestCodexBrowserCallbackRejectsWrongStateThenSucceeds(t *testing.T) {
 		b, _ := json.Marshal(map[string]any{"access_token": codexJWT("account"), "refresh_token": "refresh", "expires_in": 3600})
 		return oauthResponse(r, "application/json", b), nil
 	})}
-	manager, err := openaioauth.NewCodex(filepath.Join(t.TempDir(), "codex.json"), client, nil)
+	manager, err := openaioauth.NewCodex(filepath.Join(t.TempDir(), "codex.json"), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestCodexCancellationAndInvalidTokenDoNotSaveCredentials(t *testing.T) {
 		client := &http.Client{Transport: oauthRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return oauthResponse(r, "application/json", []byte(`{"access_token":"invalid","refresh_token":"secret","expires_in":3600}`)), nil
 		})}
-		manager, err := openaioauth.NewCodex(path, client, nil)
+		manager, err := openaioauth.NewCodex(path, client)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"hao-agent-harness/internal/config"
 	"hao-agent-harness/internal/openaioauth"
 )
 
@@ -85,15 +86,21 @@ func cliError(output io.Writer, message string) error {
 	return errors.New(message)
 }
 
-func runLogin(ctx context.Context, options cliOptions, input io.Reader, output io.Writer) int {
-	path, err := openaioauth.CodexTokenPath()
-	if err != nil {
-		fmt.Fprintln(output, err)
+func runLogin(ctx context.Context, options cliOptions, c config.Config, input io.Reader, output io.Writer) int {
+	var path string
+	for _, provider := range c.Models.Providers {
+		if provider.AuthMethod() == "openai_codex" {
+			path = provider.CodexTokenFile
+			break
+		}
+	}
+	if path == "" {
+		fmt.Fprintln(output, "配置中心中未设置 openai_codex 的 codex_token_file")
 		return 1
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	defer client.CloseIdleConnections()
-	manager, err := openaioauth.NewCodex(path, client, nil)
+	manager, err := openaioauth.NewCodex(path, client)
 	if err != nil {
 		fmt.Fprintln(output, err)
 		return 1
@@ -124,7 +131,7 @@ func runLogin(ctx context.Context, options cliOptions, input io.Reader, output i
 		return 1
 	}
 	fmt.Fprintln(output, "OpenAI Codex 登录成功，凭证已保存：", path)
-	fmt.Fprintln(output, "启动前请确认 configs/models.json 中 auth_type 为 openai_codex，并设置 CLIENT_API_KEYS（本服务访问令牌）；然后运行 go run ./cmd/server。")
+	fmt.Fprintln(output, "请确认 configs/models.json 中已配置 codex_token_file，然后运行 go run ./cmd/server。")
 	return 0
 }
 

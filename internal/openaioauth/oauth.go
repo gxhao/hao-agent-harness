@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -40,7 +39,6 @@ type Manager struct {
 	path    string
 	name    string
 	client  *http.Client
-	keys    [][32]byte
 	token   credentials
 	pending map[string]attempt
 }
@@ -74,14 +72,11 @@ type tokenReply struct {
 }
 
 // New 从磁盘读取并保护已保存的凭证，同时初始化本机 OAuth 回调状态。
-func New(path, agentName string, client *http.Client, clientKeys []string) (*Manager, error) {
-	if path == "" || agentName == "" || client == nil || len(clientKeys) == 0 {
+func New(path, agentName string, client *http.Client) (*Manager, error) {
+	if path == "" || agentName == "" || client == nil {
 		return nil, errors.New("OAuth credential path, app name and HTTP client are required")
 	}
 	m := &Manager{path: path, name: agentName, client: client, pending: make(map[string]attempt)}
-	for _, key := range clientKeys {
-		m.keys = append(m.keys, sha256.Sum256([]byte(key)))
-	}
 	b, err := os.ReadFile(path)
 	if err == nil {
 		if err := json.Unmarshal(b, &m.token); err != nil {
@@ -116,10 +111,6 @@ func (m *Manager) Handler() http.Handler { return http.HandlerFunc(m.serveHTTP) 
 func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isLoopback(r.RemoteAddr) {
 		http.Error(w, "OAuth is available only from this computer", http.StatusForbidden)
-		return
-	}
-	if r.URL.Path != callbackPath && !m.authorized(r.Header.Get("Authorization")) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if (r.URL.Path == "/auth/openai/start" || r.URL.Path == "/auth/openai/logout") && !sameOrigin(r) {
@@ -571,20 +562,6 @@ func hasScope(scopes, want string) bool {
 		}
 	}
 	return false
-}
-
-// authorized 使用与业务 API 相同的恒定时间 Bearer 比较校验 OAuth 控制接口。
-func (m *Manager) authorized(header string) bool {
-	scheme, token, ok := strings.Cut(header, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.ContainsAny(token, " \t\r\n") {
-		return false
-	}
-	hash := sha256.Sum256([]byte(token))
-	matched := 0
-	for _, key := range m.keys {
-		matched |= subtle.ConstantTimeCompare(hash[:], key[:])
-	}
-	return matched == 1
 }
 
 // hasAudience 兼容 OIDC 中 audience 为单字符串或字符串数组的两种 JSON 表示。

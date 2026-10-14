@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -25,29 +24,14 @@ const (
 	codexRedirectURI = "http://localhost:1455/auth/callback"
 )
 
-// CodexTokenPath is shared by CLI login and the inference server.
-func CodexTokenPath() (string, error) {
-	if path := os.Getenv("OPENAI_CODEX_TOKEN_FILE"); path != "" {
-		return path, nil
-	}
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", errors.New("cannot find the user configuration directory")
-	}
-	return filepath.Join(base, "hao-agent-harness", "openai-codex.json"), nil
-}
-
 // NewCodex loads Codex credentials without requiring a running API server.
-func NewCodex(path string, client *http.Client, clientKeys []string) (*Manager, error) {
+func NewCodex(path string, client *http.Client) (*Manager, error) {
 	if path == "" || client == nil {
 		return nil, errors.New("credential path and HTTP client are required")
 	}
 	privateClient := *client
 	privateClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	m := &Manager{path: path, name: "hao-agent-harness", client: &privateClient, codex: true}
-	for _, key := range clientKeys {
-		m.keys = append(m.keys, sha256.Sum256([]byte(key)))
-	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return m, nil

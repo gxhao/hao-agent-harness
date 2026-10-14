@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,7 +13,6 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	"hao-agent-harness/internal/chat"
@@ -24,7 +21,6 @@ import (
 )
 
 type Options struct {
-	ClientKeys        []string
 	MaxRequestBytes   int64
 	FirstEventTimeout time.Duration
 	StreamIdleTimeout time.Duration
@@ -35,18 +31,13 @@ type Options struct {
 type Handler struct {
 	service *service.Service
 	options Options
-	keys    [][32]byte
 	logger  *slog.Logger
 	metrics *observability.Metrics
 }
 
-// New 注入业务服务、日志和指标依赖，并预先哈希客户端密钥，避免请求处理时保存明文副本。
+// New 注入业务服务、日志和指标依赖；客户端请求不再执行 Bearer 鉴权。
 func New(s *service.Service, opts Options, logger *slog.Logger, metrics *observability.Metrics) *Handler {
-	h := &Handler{service: s, options: opts, logger: logger, metrics: metrics}
-	for _, key := range opts.ClientKeys {
-		h.keys = append(h.keys, sha256.Sum256([]byte(key)))
-	}
-	return h
+	return &Handler{service: s, options: opts, logger: logger, metrics: metrics}
 }
 
 type trace struct {
@@ -143,11 +134,6 @@ func (h *Handler) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ready"})
 		return
 	}
-	if !h.authorized(r.Header.Get("Authorization")) {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		h.fail(w, t, chat.NewError(401, "unauthorized", "客户端凭证无效"))
-		return
-	}
 	if !h.service.Ready() {
 		h.fail(w, t, chat.NewError(503, "service_unavailable", "服务正在停止"))
 		return
@@ -157,20 +143,6 @@ func (h *Handler) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.complete(w, r, t)
-}
-
-// authorized 校验 Bearer 凭证；固定时间比较减少比较过程泄露密钥信息的风险。
-func (h *Handler) authorized(header string) bool {
-	scheme, token, ok := strings.Cut(header, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.ContainsAny(token, " \t\r\n") {
-		return false
-	}
-	hash := sha256.Sum256([]byte(token))
-	matched := 0
-	for _, key := range h.keys {
-		matched |= subtle.ConstantTimeCompare(hash[:], key[:])
-	}
-	return matched == 1
 }
 
 // models 将服务配置中的模型别名转换成兼容 OpenAI 风格的模型列表响应。

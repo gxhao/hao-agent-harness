@@ -26,33 +26,35 @@ func run() int {
 		return 2
 	}
 	bootstrap := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	// 两个入口共用当前目录的 .env，确保登录保存和服务读取使用同一凭证路径。
-	// 参数错误和帮助已提前返回；文件只补充环境，不覆盖部署时显式注入的值。
-	if err := config.LoadDotEnv(".env"); err != nil {
+	c, err := config.Load()
+	if err != nil {
 		bootstrap.Error("configuration_failed", "error", err.Error())
 		return 1
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if options.login != "" {
-		return runLogin(ctx, options, os.Stdin, os.Stdout)
-	}
-	c, err := config.Load()
-	if err != nil {
-		bootstrap.Error("configuration_failed", "error", err.Error())
-		return 1
+		return runLogin(ctx, options, c, os.Stdin, os.Stdout)
 	}
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(c.LogLevel)); err != nil {
 		bootstrap.Error("invalid_log_level")
 		return 1
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	levelVar := new(slog.LevelVar)
+	levelVar.Set(level)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: levelVar}))
 	app, err := server.New(c, logger)
 	if err != nil {
 		logger.Error("initialization_failed", "error", err.Error())
 		return 1
 	}
+	app.SetConfigApplied(func(updated config.Config) {
+		var next slog.Level
+		if next.UnmarshalText([]byte(updated.LogLevel)) == nil {
+			levelVar.Set(next)
+		}
+	})
 	if err := app.Run(ctx); err != nil {
 		logger.Error("server_failed", "error", err.Error())
 		return 1

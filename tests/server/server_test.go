@@ -19,7 +19,7 @@ func appFixture(t *testing.T, upstream http.HandlerFunc, grace time.Duration) (s
 	t.Helper()
 	u := httptest.NewTLSServer(upstream)
 	t.Cleanup(u.Close)
-	c := config.Config{HTTPAddr: "127.0.0.1:0", MetricsAddr: "", ClientKeys: []string{"client-secret"}, Models: config.Models{Providers: map[string]config.Provider{"primary": {ChatURL: u.URL + "/v1/chat/completions", APIKeyEnv: "UPSTREAM_API_KEY_PRIMARY", APIKey: "upstream-secret"}}, Models: map[string]config.Model{"default": {Provider: "primary", UpstreamModel: "real-model", SupportsStream: true, MaxOutputTokens: 4096}}}, MaxRequestBytes: 1024, MaxConcurrent: 8, RequestTimeout: 5 * time.Second, HeaderTimeout: time.Second, FirstEventTimeout: time.Second, StreamIdleTimeout: time.Second, WriteTimeout: time.Second, ShutdownTimeout: grace, LogLevel: "info"}
+	c := config.Config{HTTPAddr: "127.0.0.1:0", MetricsAddr: "", Models: config.Models{Providers: map[string]config.Provider{"primary": {ChatURL: u.URL + "/v1/chat/completions", APIKey: "upstream-secret"}}, Models: map[string]config.Model{"default": {Provider: "primary", UpstreamModel: "real-model", SupportsStream: true, SupportsTemperature: true, SupportsMaxTokens: true, MaxOutputTokens: 4096}}}, MaxRequestBytes: 1024, MaxConcurrent: 8, RequestTimeout: 5 * time.Second, HeaderTimeout: time.Second, FirstEventTimeout: time.Second, StreamIdleTimeout: time.Second, WriteTimeout: time.Second, ShutdownTimeout: grace, LogLevel: "info"}
 	// Distinct listener addresses are validated before binding. Tests supply two
 	// already-bound ephemeral listeners to avoid port reservation races.
 	c.MetricsAddr = "localhost:0"
@@ -178,4 +178,82 @@ func TestGracefulAndForcedStreamingShutdown(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHotReloadRebindsListenerAndChangesModelSnapshot(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+	firstAddr, secondAddr := freeTCPAddress(t), freeTCPAddress(t)
+	c := config.Config{HTTPAddr: firstAddr, MetricsAddr: "", Models: config.Models{
+		Providers: map[string]config.Provider{"primary": {ChatURL: upstream.URL + "/v1/chat/completions", APIKey: "provider-secret"}},
+		Models:    map[string]config.Model{"before": {Provider: "primary", UpstreamModel: "model-a", SupportsStream: true, SupportsTemperature: true, SupportsMaxTokens: true, MaxOutputTokens: 4096}},
+	}, MaxRequestBytes: 1024, MaxConcurrent: 8, RequestTimeout: 5 * time.Second, HeaderTimeout: time.Second,
+		FirstEventTimeout: time.Second, StreamIdleTimeout: time.Second, WriteTimeout: time.Second, ShutdownTimeout: time.Second, LogLevel: "info"}
+	app, err := server.NewWithHTTPClient(c, slog.New(slog.NewTextHandler(io.Discard, nil)), upstream.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- app.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("hot reload server did not stop")
+		}
+	}()
+	waitReady(t, "http://"+firstAddr)
+
+	updated := c
+	updated.HTTPAddr = secondAddr
+	updated.Models = config.Models{Providers: c.Models.Providers, Models: map[string]config.Model{
+		"after": {Provider: "primary", UpstreamModel: "model-b", SupportsStream: true, SupportsTemperature: true, SupportsMaxTokens: true, MaxOutputTokens: 4096},
+	}}
+	if err := app.ApplyConfig(updated); err != nil {
+		t.Fatal(err)
+	}
+	waitReady(t, "http://"+secondAddr)
+	response, err := http.Get("http://" + secondAddr + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"id":"after"`) || strings.Contains(string(body), `"id":"before"`) {
+		t.Fatalf("new listener did not use updated model snapshot: %d %s", response.StatusCode, body)
+	}
+}
+
+func freeTCPAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
+}
+
+func waitReady(t *testing.T, baseURL string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := http.Get(baseURL + "/readyz")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("server at %s did not become ready", baseURL)
 }

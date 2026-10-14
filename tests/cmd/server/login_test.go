@@ -51,29 +51,59 @@ func TestServerCLI(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			writeCLIEnv(t, dir, "INVALID\n")
+			if tc.want == 1 {
+				writeCLIConfig(t, dir, "server: [")
+			}
 			output := runCLI(t, binary, dir, tc.want, tc.args...)
-			// 合法参数进入 dotenv 校验；帮助和非法参数必须在读取文件之前返回。
-			if strings.Contains(output, ".env: line 1:") != (tc.want == 1) {
-				t.Fatal("unexpected argument parsing and dotenv loading order")
+			// 合法参数进入配置加载；帮助和非法参数在读取配置文件之前返回。
+			if strings.Contains(output, "invalid YAML configuration") != (tc.want == 1) {
+				t.Fatal("unexpected argument parsing and configuration loading order")
 			}
 		})
 	}
 
 	t.Run("login-credential-path", func(t *testing.T) {
 		dir := t.TempDir()
-		// 目录不是凭证文件；若 .env 路径生效，登录将在任何网络操作之前退出。
-		writeCLIEnv(t, dir, "OPENAI_CODEX_TOKEN_FILE=.\n")
+		// 目录不是凭证文件；YAML 路径生效时登录会在任何网络操作之前退出。
+		writeCLIConfig(t, dir, `server:
+  http_addr: 127.0.0.1:8080
+  metrics_addr: ""
+  max_request_bytes: 1048576
+  max_concurrent_requests: 64
+  request_timeout: 120s
+  upstream_header_timeout: 30s
+  stream_first_event_timeout: 30s
+  stream_idle_timeout: 30s
+  downstream_write_timeout: 15s
+  shutdown_timeout: 30s
+logging:
+  level: info
+  chat_log_dir: ""
+providers:
+  openai:
+    auth_type: openai_codex
+    codex_token_file: .
+models:
+  default:
+    provider: openai
+    upstream_model: codex-model
+    supports_stream: true
+    supports_temperature: false
+    supports_max_tokens: false
+`)
 		output := runCLI(t, binary, dir, 1, "--login", "--no-browser")
 		if !strings.Contains(output, "cannot read OpenAI Codex credential file") {
-			t.Fatal("login did not use credential path loaded from dotenv")
+			t.Fatal("login did not use credential path loaded from YAML")
 		}
 	})
 }
 
-func writeCLIEnv(t *testing.T, dir, content string) {
+func writeCLIConfig(t *testing.T, dir, content string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "configs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "configs", "models.json"), []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -87,12 +117,6 @@ func runCLI(t *testing.T, binary, dir string, want int, args ...string) string {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
 	cmd.Env = []string{}
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if !strings.EqualFold(name, "OPENAI_CODEX_TOKEN_FILE") {
-			cmd.Env = append(cmd.Env, entry)
-		}
-	}
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatal("CLI test timed out")

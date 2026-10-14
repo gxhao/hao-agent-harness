@@ -94,24 +94,22 @@
             <div class="send-area"><span class="shortcut-hint">Enter 发送 · Shift + Enter 换行</span><button class="send-button" id="send-button" type="button" aria-label="发送消息"><span>↑</span></button></div>
           </div>
         </div>
-        <p class="composer-note">AI 生成的内容请自行核验。<button id="connection-inline" type="button">管理连接与凭证</button><span class="save-status" id="save-status" role="status">自动保存已开启</span></p>
+        <p class="composer-note">AI 生成的内容请自行核验。<button id="connection-inline" type="button">管理模型与账号</button><span class="save-status" id="save-status" role="status">自动保存已开启</span></p>
       </footer>
     </main>
   </div>
 
   <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
     <form method="dialog" class="dialog-top"><div class="dialog-mark"><img src="/assets/mark.svg" alt="" width="28" height="28"></div><button class="icon-button close-dialog" aria-label="关闭">×</button></form>
-    <div class="dialog-heading"><span class="eyebrow"><i></i> WORKSPACE SETTINGS</span><h2 id="settings-title">连接设置</h2><p>客户端令牌保存在当前标签页；OpenAI OAuth 令牌保存在本机用户配置目录。</p></div>
-    <label class="field-label" for="token-input">客户端访问令牌</label>
-    <div class="token-field"><input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 CLIENT_API_KEYS 中的令牌"><button type="button" id="reveal-token">显示</button></div>
+    <div class="dialog-heading"><span class="eyebrow"><i></i> WORKSPACE SETTINGS</span><h2 id="settings-title">模型与账号</h2><p>模型和服务设置由本机 YAML 配置中心管理；OpenAI OAuth 令牌保存在独立凭证文件。</p></div>
     <div class="field-help"><span class="green-dot"></span> API 地址使用当前页面的来源 <code id="api-origin"></code></div>
-    <div class="model-sync"><div><strong>模型列表</strong><small id="model-sync-status">连接后可从服务读取</small></div><button type="button" id="refresh-models" class="secondary-button">连接并加载模型</button></div>
+    <div class="model-sync"><div><strong>模型列表</strong><small id="model-sync-status">从本地服务读取</small></div><button type="button" id="refresh-models" class="secondary-button">刷新模型</button></div>
     <section class="oauth-login" id="openai-oauth-panel" hidden>
       <div><strong>OpenAI 账号</strong><small id="openai-oauth-status">使用 ChatGPT 账号授权模型调用</small></div>
       <div class="oauth-actions"><button type="button" id="openai-login" class="secondary-button">Continue with ChatGPT</button><button type="button" id="openai-logout" class="quiet-button" hidden>退出授权</button></div>
     </section>
     <div class="settings-error" id="settings-error" role="status"></div>
-    <div class="dialog-bottom"><button id="clear-token" type="button" class="quiet-button">清除本页凭证</button><button id="save-token" type="button" class="primary-button">保存连接</button></div>
+    <div class="dialog-bottom"><span></span><button id="close-settings" type="button" class="primary-button">完成</button></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>
   <script src="/assets/vendor/marked.js" defer></script>

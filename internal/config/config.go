@@ -1,28 +1,39 @@
-// Package config loads and validates startup configuration without exposing secrets.
+// Package config 负责从本地 YAML 配置中心加载、校验并热监视服务配置。
 package config
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	// DefaultPath 是应用唯一的运行配置入口；环境变量不会覆盖此路径或其中的值。
+	DefaultPath    = "configs/models.json"
+	maxConfigBytes = 1 << 20
 )
 
 type Provider struct {
-	AuthType  string `json:"auth_type,omitempty"`
-	ChatURL   string `json:"chat_url"`
-	APIKeyEnv string `json:"api_key_env"`
-	APIKey    string `json:"-"`
+	AuthType       string `yaml:"auth_type,omitempty"`
+	ChatURL        string `yaml:"chat_url,omitempty"`
+	APIKey         string `yaml:"api_key,omitempty"`
+	OAuthTokenFile string `yaml:"oauth_token_file,omitempty"`
+	CodexTokenFile string `yaml:"codex_token_file,omitempty"`
 }
 
-// AuthMethod keeps the API-key default consistent for loaded and programmatic configs.
+// AuthMethod 让省略 auth_type 的兼容 Provider 保持 API Key 模式。
 func (p Provider) AuthMethod() string {
 	if p.AuthType == "" {
 		return "api_key"
@@ -30,14 +41,13 @@ func (p Provider) AuthMethod() string {
 	return p.AuthType
 }
 
-// modelDefinition preserves omitted fields so explicit false values remain effective.
 type modelDefinition struct {
-	Provider            string `json:"provider"`
-	UpstreamModel       string `json:"upstream_model"`
-	SupportsStream      *bool  `json:"supports_stream"`
-	SupportsTemperature *bool  `json:"supports_temperature"`
-	SupportsMaxTokens   *bool  `json:"supports_max_tokens"`
-	MaxOutputTokens     *int   `json:"max_output_tokens"`
+	Provider            string `yaml:"provider"`
+	UpstreamModel       string `yaml:"upstream_model"`
+	SupportsStream      *bool  `yaml:"supports_stream,omitempty"`
+	SupportsTemperature *bool  `yaml:"supports_temperature,omitempty"`
+	SupportsMaxTokens   *bool  `yaml:"supports_max_tokens,omitempty"`
+	MaxOutputTokens     *int   `yaml:"max_output_tokens,omitempty"`
 }
 
 func (d modelDefinition) model(p Provider) Model {
@@ -62,191 +72,185 @@ func (d modelDefinition) model(p Provider) Model {
 }
 
 type Model struct {
-	Provider            string `json:"provider"`
-	UpstreamModel       string `json:"upstream_model"`
-	SupportsStream      bool   `json:"supports_stream"`
-	SupportsTemperature bool   `json:"supports_temperature"`
-	SupportsMaxTokens   bool   `json:"supports_max_tokens"`
-	MaxOutputTokens     int    `json:"max_output_tokens"`
+	Provider            string `yaml:"provider"`
+	UpstreamModel       string `yaml:"upstream_model"`
+	SupportsStream      bool   `yaml:"supports_stream"`
+	SupportsTemperature bool   `yaml:"supports_temperature"`
+	SupportsMaxTokens   bool   `yaml:"supports_max_tokens"`
+	MaxOutputTokens     int    `yaml:"max_output_tokens"`
 }
 
 type Models struct {
-	Providers map[string]Provider `json:"providers"`
-	Models    map[string]Model    `json:"models"`
+	Providers map[string]Provider `yaml:"providers"`
+	Models    map[string]Model    `yaml:"models"`
 }
 
+// Config 是运行中的不可变配置快照；热加载会整体替换快照，避免字段逐项更新时出现混合状态。
 type Config struct {
-	HTTPAddr             string
-	MetricsAddr          string
-	ClientKeys           []string
-	Models               Models
-	MaxRequestBytes      int64
-	MaxConcurrent        int
-	RequestTimeout       time.Duration
-	HeaderTimeout        time.Duration
-	FirstEventTimeout    time.Duration
-	StreamIdleTimeout    time.Duration
-	WriteTimeout         time.Duration
-	ShutdownTimeout      time.Duration
-	LogLevel             string
-	ChatLogDir           string
-	OpenAITokenFile      string
-	OpenAICodexTokenFile string
+	HTTPAddr          string
+	MetricsAddr       string
+	Models            Models
+	MaxRequestBytes   int64
+	MaxConcurrent     int
+	RequestTimeout    time.Duration
+	HeaderTimeout     time.Duration
+	FirstEventTimeout time.Duration
+	StreamIdleTimeout time.Duration
+	WriteTimeout      time.Duration
+	ShutdownTimeout   time.Duration
+	LogLevel          string
+	ChatLogDir        string
+}
+
+type fileConfig struct {
+	Server struct {
+		HTTPAddr          string `yaml:"http_addr"`
+		MetricsAddr       string `yaml:"metrics_addr"`
+		MaxRequestBytes   int64  `yaml:"max_request_bytes"`
+		MaxConcurrent     int    `yaml:"max_concurrent_requests"`
+		RequestTimeout    string `yaml:"request_timeout"`
+		HeaderTimeout     string `yaml:"upstream_header_timeout"`
+		FirstEventTimeout string `yaml:"stream_first_event_timeout"`
+		StreamIdleTimeout string `yaml:"stream_idle_timeout"`
+		WriteTimeout      string `yaml:"downstream_write_timeout"`
+		ShutdownTimeout   string `yaml:"shutdown_timeout"`
+	} `yaml:"server"`
+	Logging struct {
+		Level      string `yaml:"level"`
+		ChatLogDir string `yaml:"chat_log_dir"`
+	} `yaml:"logging"`
+	Providers map[string]Provider        `yaml:"providers"`
+	Models    map[string]modelDefinition `yaml:"models"`
 }
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
-var envPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
-// Load 从环境变量和模型 JSON 文件构造配置；密钥只从指定环境变量读取，不写入日志或错误文本。
-func Load() (Config, error) {
-	c := Config{HTTPAddr: env("HTTP_ADDR", "127.0.0.1:8080"), MetricsAddr: env("METRICS_ADDR", "127.0.0.1:9090"), LogLevel: env("LOG_LEVEL", "info"), OpenAITokenFile: os.Getenv("OPENAI_OAUTH_TOKEN_FILE")}
-	c.OpenAICodexTokenFile = os.Getenv("OPENAI_CODEX_TOKEN_FILE")
-	c.ChatLogDir = env("CHAT_LOG_DIR", "logs/requests")
-	for _, key := range strings.Split(os.Getenv("CLIENT_API_KEYS"), ",") {
-		key = strings.TrimSpace(key)
-		if key != "" {
-			c.ClientKeys = append(c.ClientKeys, key)
-		}
-	}
-	var err error
-	if c.MaxRequestBytes, err = integer("MAX_REQUEST_BYTES", 1<<20); err != nil {
-		return c, err
-	}
-	maxConcurrent, err := integer("MAX_CONCURRENT_REQUESTS", 64)
+// Load 从固定配置中心读取当前服务配置，不访问进程环境变量或 .env。
+func Load() (Config, error) { return LoadFile(DefaultPath) }
+
+// LoadFile 读取单个受限大小的 YAML 文件；严格拒绝 JSON 旧格式、未知字段和尾随文档。
+func LoadFile(path string) (Config, error) {
+	var c Config
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return c, err
+		return c, fmt.Errorf("cannot read configuration file %s", path)
 	}
-	if maxConcurrent > 100000 {
-		return c, fmt.Errorf("MAX_CONCURRENT_REQUESTS must be <= 100000")
+	return decodeConfig(path, b)
+}
+
+func decodeConfig(path string, b []byte) (Config, error) {
+	var c Config
+	if len(b) == 0 || len(b) > maxConfigBytes {
+		return c, errors.New("configuration file is empty or exceeds 1 MiB")
 	}
-	c.MaxConcurrent = int(maxConcurrent)
-	for _, spec := range []struct {
-		name     string
-		fallback time.Duration
-		dest     *time.Duration
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		return c, errors.New("configuration must use YAML syntax")
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	var raw fileConfig
+	if err := dec.Decode(&raw); err != nil {
+		return c, errors.New("invalid YAML configuration")
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return c, errors.New("configuration must contain one YAML document")
+	}
+	c = Config{HTTPAddr: raw.Server.HTTPAddr, MetricsAddr: raw.Server.MetricsAddr,
+		MaxRequestBytes: raw.Server.MaxRequestBytes, MaxConcurrent: raw.Server.MaxConcurrent,
+		LogLevel: raw.Logging.Level, ChatLogDir: raw.Logging.ChatLogDir}
+	for _, item := range []struct {
+		text   string
+		target *time.Duration
+		field  string
 	}{
-		{"REQUEST_TIMEOUT", 120 * time.Second, &c.RequestTimeout},
-		{"UPSTREAM_HEADER_TIMEOUT", 30 * time.Second, &c.HeaderTimeout},
-		{"STREAM_FIRST_EVENT_TIMEOUT", 30 * time.Second, &c.FirstEventTimeout},
-		{"STREAM_IDLE_TIMEOUT", 30 * time.Second, &c.StreamIdleTimeout},
-		{"DOWNSTREAM_WRITE_TIMEOUT", 15 * time.Second, &c.WriteTimeout},
-		{"SHUTDOWN_TIMEOUT", 30 * time.Second, &c.ShutdownTimeout},
+		{raw.Server.RequestTimeout, &c.RequestTimeout, "request_timeout"},
+		{raw.Server.HeaderTimeout, &c.HeaderTimeout, "upstream_header_timeout"},
+		{raw.Server.FirstEventTimeout, &c.FirstEventTimeout, "stream_first_event_timeout"},
+		{raw.Server.StreamIdleTimeout, &c.StreamIdleTimeout, "stream_idle_timeout"},
+		{raw.Server.WriteTimeout, &c.WriteTimeout, "downstream_write_timeout"},
+		{raw.Server.ShutdownTimeout, &c.ShutdownTimeout, "shutdown_timeout"},
 	} {
-		*spec.dest, err = time.ParseDuration(env(spec.name, spec.fallback.String()))
-		if err != nil || *spec.dest <= 0 {
-			return c, fmt.Errorf("%s must be a positive duration", spec.name)
+		d, err := time.ParseDuration(item.text)
+		if err != nil {
+			return c, fmt.Errorf("invalid duration for %s", item.field)
 		}
+		*item.target = d
 	}
-	path := env("MODEL_CONFIG_PATH", "configs/models.json")
-	if path == "" {
-		return c, fmt.Errorf("MODEL_CONFIG_PATH is required")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return c, fmt.Errorf("cannot open model configuration; set MODEL_CONFIG_PATH or create configs/models.json")
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
-	if err != nil || len(b) > 1<<20 {
-		return c, fmt.Errorf("model configuration exceeds limit or cannot be read")
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	var definitions struct {
-		Providers map[string]Provider        `json:"providers"`
-		Models    map[string]modelDefinition `json:"models"`
-	}
-	if err := dec.Decode(&definitions); err != nil {
-		return c, fmt.Errorf("invalid model configuration JSON")
-	}
-	if err := dec.Decode(new(any)); err != io.EOF {
-		return c, fmt.Errorf("model configuration must contain one JSON object")
-	}
-	c.Models = Models{Providers: definitions.Providers, Models: make(map[string]Model, len(definitions.Models))}
-	for name, p := range c.Models.Providers {
-		if p.APIKeyEnv != "" {
-			p.APIKey = os.Getenv(p.APIKeyEnv)
-		}
-		c.Models.Providers[name] = p
-	}
-	for name, definition := range definitions.Models {
+	c.Models = Models{Providers: raw.Providers, Models: make(map[string]Model, len(raw.Models))}
+	for name, definition := range raw.Models {
 		c.Models.Models[name] = definition.model(c.Models.Providers[definition.Provider])
 	}
 	return c, c.Validate()
 }
 
-// Validate 检查配置之间的约束。这里用值接收者，因为校验只读取 Config，不需要修改它。
+// Validate 检查配置之间的约束，并确保密钥只出现在内存配置中，不进入错误文本。
 func (c Config) Validate() error {
-	if len(c.ClientKeys) == 0 {
-		return fmt.Errorf("CLIENT_API_KEYS is required")
-	}
-	for _, key := range c.ClientKeys {
-		if strings.TrimSpace(key) == "" || strings.ContainsAny(key, " \t\r\n") {
-			return fmt.Errorf("client tokens must be nonempty and contain no whitespace")
-		}
-	}
 	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
-		return fmt.Errorf("invalid HTTP_ADDR")
+		return errors.New("invalid server.http_addr")
 	}
 	if c.MetricsAddr != "" {
 		if _, _, err := net.SplitHostPort(c.MetricsAddr); err != nil {
-			return fmt.Errorf("invalid METRICS_ADDR")
+			return errors.New("invalid server.metrics_addr")
 		}
 		if c.MetricsAddr == c.HTTPAddr {
-			return fmt.Errorf("metrics and API listeners must differ")
+			return errors.New("metrics and API listeners must differ")
 		}
 	}
 	if c.MaxRequestBytes <= 0 || c.MaxRequestBytes > 64<<20 || c.MaxConcurrent <= 0 || c.MaxConcurrent > 100000 {
-		return fmt.Errorf("invalid request size or concurrency limit")
+		return errors.New("invalid request size or concurrency limit")
 	}
 	for _, d := range []time.Duration{c.RequestTimeout, c.HeaderTimeout, c.FirstEventTimeout, c.StreamIdleTimeout, c.WriteTimeout, c.ShutdownTimeout} {
 		if d <= 0 {
-			return fmt.Errorf("timeouts must be positive")
+			return errors.New("timeouts must be positive")
 		}
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
-		return fmt.Errorf("invalid LOG_LEVEL")
+		return errors.New("invalid logging.level")
 	}
 	if len(c.Models.Models) == 0 || len(c.Models.Providers) == 0 {
-		return fmt.Errorf("at least one provider and model are required")
+		return errors.New("at least one provider and model are required")
 	}
 	for name, p := range c.Models.Providers {
 		if !namePattern.MatchString(name) {
-			return fmt.Errorf("invalid provider name or key environment variable")
+			return errors.New("invalid provider name")
 		}
 		switch p.AuthMethod() {
 		case "api_key":
-			if !envPattern.MatchString(p.APIKeyEnv) {
-				return fmt.Errorf("provider %s requires a valid api_key_env", name)
+			u, err := url.Parse(p.ChatURL)
+			if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path == "" {
+				return fmt.Errorf("provider %s requires a fixed HTTPS chat_url", name)
 			}
-		case "openai_oauth", "openai_codex":
-			if p.APIKeyEnv != "" || p.ChatURL != "" {
-				return fmt.Errorf("provider %s %s uses a fixed Responses API and does not accept chat_url or api_key_env", name, p.AuthType)
+			if strings.TrimSpace(p.APIKey) == "" || strings.ContainsAny(p.APIKey, "\r\n") {
+				return fmt.Errorf("provider %s requires api_key", name)
+			}
+			if p.OAuthTokenFile != "" || p.CodexTokenFile != "" {
+				return fmt.Errorf("provider %s has incompatible credential file fields", name)
+			}
+		case "openai_oauth":
+			if p.APIKey != "" || p.ChatURL != "" || p.CodexTokenFile != "" || p.OAuthTokenFile == "" {
+				return fmt.Errorf("provider %s openai_oauth requires oauth_token_file and uses a fixed API", name)
+			}
+		case "openai_codex":
+			if p.APIKey != "" || p.ChatURL != "" || p.OAuthTokenFile != "" || p.CodexTokenFile == "" {
+				return fmt.Errorf("provider %s openai_codex requires codex_token_file and uses a fixed API", name)
 			}
 		default:
 			return fmt.Errorf("provider %s has an unsupported auth_type", name)
 		}
-		if p.AuthMethod() != "api_key" {
-			continue
-		}
-		u, err := url.Parse(p.ChatURL)
-		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path == "" {
-			return fmt.Errorf("provider %s requires a fixed HTTPS URL without credentials, query or fragment", name)
-		}
-		if strings.TrimSpace(p.APIKey) == "" || strings.ContainsAny(p.APIKey, "\r\n") {
-			return fmt.Errorf("provider %s is missing a valid API key", name)
-		}
 	}
 	for name, m := range c.Models.Models {
 		if !namePattern.MatchString(name) || strings.TrimSpace(m.UpstreamModel) == "" {
-			return fmt.Errorf("invalid model alias or upstream model")
+			return errors.New("invalid model alias or upstream_model")
 		}
-		if _, ok := c.Models.Providers[m.Provider]; !ok {
+		p, ok := c.Models.Providers[m.Provider]
+		if !ok {
 			return fmt.Errorf("model %s references unknown provider", name)
 		}
-		if c.Models.Providers[m.Provider].AuthType == "openai_codex" && m.SupportsMaxTokens {
+		if p.AuthMethod() == "openai_codex" && m.SupportsMaxTokens {
 			return fmt.Errorf("model %s openai_codex does not support max_tokens; set supports_max_tokens to false", name)
 		}
 		if m.MaxOutputTokens < 0 || m.SupportsMaxTokens && m.MaxOutputTokens == 0 {
@@ -256,19 +260,69 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// env 返回已设置的环境变量，即使它是空字符串；只有变量不存在时才采用默认值。
-func env(name, fallback string) string {
-	if value, ok := os.LookupEnv(name); ok {
-		return value
+// WatchFile 轮询配置文件。只有内容变化且解析成功、应用回调成功时才推进快照；回调错误保留旧配置。
+func WatchFile(ctx context.Context, path string, initialConfig Config, interval time.Duration, onApply func(Config) error, onError func(error)) {
+	if interval <= 0 {
+		interval = time.Second
 	}
-	return fallback
-}
-
-// integer 解析正整数环境变量，并将格式错误或非正数转换成带变量名的配置错误。
-func integer(name string, fallback int64) (int64, error) {
-	v, err := strconv.ParseInt(env(name, strconv.FormatInt(fallback, 10)), 10, 64)
-	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("%s must be a positive integer", name)
+	initial, readErr := os.ReadFile(path)
+	var last [32]byte
+	var lastRejected [32]byte
+	var hasRejected bool
+	var lastApplyFailure [32]byte
+	var hasApplyFailure bool
+	if readErr != nil {
+		onError(errors.New("cannot monitor configuration file"))
+	} else {
+		last = sha256.Sum256(initial)
+		if current, err := decodeConfig(path, initial); err != nil {
+			lastRejected, hasRejected = last, true
+			onError(err)
+		} else if !reflect.DeepEqual(current, initialConfig) {
+			if err := onApply(current); err != nil {
+				last = [32]byte{}
+				lastApplyFailure, hasApplyFailure = sha256.Sum256(initial), true
+				onError(err)
+			}
+		}
 	}
-	return v, nil
+	var lastReadError string
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b, err := os.ReadFile(path)
+			if err != nil {
+				if lastReadError == "" {
+					onError(errors.New("cannot read changed configuration"))
+					lastReadError = "read-error"
+				}
+				continue
+			}
+			lastReadError = ""
+			digest := sha256.Sum256(b)
+			if digest == last || hasRejected && digest == lastRejected {
+				continue
+			}
+			c, err := decodeConfig(path, b)
+			if err != nil {
+				lastRejected, hasRejected = digest, true
+				onError(err)
+				continue
+			}
+			if err := onApply(c); err != nil {
+				if !hasApplyFailure || digest != lastApplyFailure {
+					onError(err)
+					lastApplyFailure, hasApplyFailure = digest, true
+				}
+				continue
+			}
+			last = digest
+			hasRejected = false
+			hasApplyFailure = false
+		}
+	}
 }
