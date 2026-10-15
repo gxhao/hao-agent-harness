@@ -1,7 +1,7 @@
 # 此文件是唯一的应用配置中心。虽保留 .json 路径以兼容现有部署，内容必须使用 YAML。
 # 修改后约 1 秒内自动校验并热加载；无效配置会保留上一份有效配置。
 server:
-  http_addr: 127.0.0.1:8080
+  http_addr: 127.0.0.1:8090
   metrics_addr: 127.0.0.1:9090
   max_request_bytes: 1048576
   max_concurrent_requests: 64

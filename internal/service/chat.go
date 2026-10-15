@@ -52,8 +52,20 @@ func (s *Service) Models() []string {
 // 派生 context 同时受调用方取消、服务退出和单请求超时约束。
 func (s *Service) Open(ctx context.Context, req chat.Request) (*Session, error) {
 	m, ok := s.models[req.Model]
+	alias := req.Model
+	metricModel := alias
 	if !ok {
-		return nil, chat.NewError(400, "unknown_model", "模型不存在")
+		// OpenAI 兼容 API 通常直接传上游模型名。仅在配置了 default 模型且
+		// 它明确使用 openai provider 时，将未配置的名称作为上游模型透传。
+		// provider 仍来自本地配置，客户端不能借此指定任意 URL 或凭证。
+		defaultModel, hasDefault := s.models["default"]
+		_, hasOpenAI := s.providers["openai"]
+		if !hasDefault || defaultModel.Provider != "openai" || !hasOpenAI || req.Model == "" {
+			return nil, chat.NewError(400, "unknown_model", "模型不存在")
+		}
+		m = defaultModel
+		m.UpstreamModel = req.Model
+		metricModel = "default"
 	}
 	if err := validate(req, m); err != nil {
 		return nil, err
@@ -76,9 +88,8 @@ func (s *Service) Open(ctx context.Context, req chat.Request) (*Session, error) 
 	s.mu.Unlock()
 	requestCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	stop := context.AfterFunc(s.root, cancel)
-	alias := req.Model
 	req.Model = m.UpstreamModel
-	return &Session{ctx: requestCtx, cancel: cancel, stop: stop, release: func() { <-s.permits }, provider: p, request: req, Alias: alias, ProviderName: m.Provider}, nil
+	return &Session{ctx: requestCtx, cancel: cancel, stop: stop, release: func() { <-s.permits }, provider: p, request: req, Alias: alias, MetricModel: metricModel, ProviderName: m.Provider}, nil
 }
 
 // validate 检查消息格式、数值范围及所选模型声明支持的参数。
@@ -121,6 +132,7 @@ type Session struct {
 	provider     chat.Provider
 	request      chat.Request
 	Alias        string
+	MetricModel  string
 	ProviderName string
 }
 
@@ -135,6 +147,7 @@ func (s *Session) Complete() (chat.Response, error) {
 	}
 	return response, err
 }
+
 // Stream 打开上游事件流；返回的 Stream 由调用方顺序读取并最终关闭。
 func (s *Session) Stream() (chat.Stream, error) { return s.provider.Stream(s.ctx, s.request) }
 

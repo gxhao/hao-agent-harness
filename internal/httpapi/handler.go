@@ -208,8 +208,8 @@ func (h *Handler) complete(w *responseWriter, r *http.Request, t *trace) {
 		return
 	}
 	defer session.Close()
-	// Only configured aliases become metric labels; untrusted names never do.
-	t.labels.Model = session.Alias
+	// 直传模型名属于调用方输入，Session 会将其指标标签归一到 default，避免产生高基数标签。
+	t.labels.Model = session.MetricModel
 	t.labels.Provider = session.ProviderName
 	if request.Stream {
 		h.stream(w, r, t, session)

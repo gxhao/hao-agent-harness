@@ -57,7 +57,7 @@ Content-Type: application/json
 }
 ```
 
-接口接受 `model`、`messages`、`stream`、`temperature`、`max_tokens`。未知字段返回 400；只支持文本消息及 `system`、`user`、`assistant` 角色。JSON 只能包含一个完整对象；请求默认上限 1 MiB，最大可配置到 64 MiB。模型别名必须命中 YAML 配置，调用方不能传入任意 URL。
+接口接受 `model`、`messages`、`stream`、`temperature`、`max_tokens`。未知字段返回 400；只支持文本消息及 `system`、`user`、`assistant` 角色。JSON 只能包含一个完整对象；请求默认上限 1 MiB，最大可配置到 64 MiB。`model` 命中配置别名时使用其 Provider 与上游模型名。未命中时，若配置了 `models.default` 且其 provider 为 `openai`，服务将请求中的模型名作为上游模型名，沿用 `default` 的参数能力，并通过已配置的 `openai` Provider 调用；否则返回 `unknown_model`。响应回显请求模型名，指标以固定的 `default` 别名计数。此回退只允许选择配置中的 Provider，不接受客户端 URL 或凭证。
 
 正常非流式响应返回兼容 Chat Completions 的 JSON；`stream=true` 返回 SSE。流内错误会以 `data: {"error":...}` 事件发送并关闭连接，不发送 `[DONE]`。客户端需要同时检查 HTTP 状态和流内错误。上游缺少 usage 时不估算 token 数。
 

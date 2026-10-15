@@ -118,7 +118,9 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/v1/chat/completions' 
 
 接口接受 `model`、`messages`、`stream`、`temperature`、`max_tokens`；未知字段返回 400。只支持文本消息及 `system`、`user`、`assistant` 角色。`temperature=0` 会被完整保留；没有指定的可选参数交给供应商默认处理。`max_output_tokens` 限制显式传入的 `max_tokens`，未传入时不会覆盖供应商默认值。
 
-返回的模型名称始终是公开别名。供应商不提供 usage 时省略该字段，不推算 token 用量。流式正常结束发送 `data: [DONE]`；流中失败发送 `data: {"error":...}` 后关闭，不发送 `[DONE]`。客户端需要同时识别 HTTP 错误和流内错误。
+`model` 可以传配置中的公开别名（例如 `default`），也可以直接传上游模型名。未命中别名时，服务仅在配置存在 `models.default` 且其 `provider` 为 `openai` 时，使用该 OpenAI provider 并将传入名称作为上游模型名；此时参数能力沿用 `default` 模型配置。响应中的模型名回显请求值，访问指标仍使用固定的 `default` 标签。未配置上述默认路由时，未识别的模型名仍返回 `unknown_model`。例如可将请求中的 `"model":"default"` 改为 `"model":"gpt-6-luna"`，直接调用该上游模型。
+
+返回的模型名称与请求中的 `model` 一致：别名调用返回公开别名，直传调用返回请求中的上游模型名。供应商不提供 usage 时省略该字段，不推算 token 用量。流式正常结束发送 `data: [DONE]`；流中失败发送 `data: {"error":...}` 后关闭，不发送 `[DONE]`。客户端需要同时识别 HTTP 错误和流内错误。
 
 ## 配置
 

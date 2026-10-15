@@ -19,6 +19,16 @@ func (waitingProvider) Complete(ctx context.Context, _ chat.Request) (chat.Respo
 }
 func (waitingProvider) Stream(context.Context, chat.Request) (chat.Stream, error) { panic("not used") }
 
+type recordingProvider struct{ request chat.Request }
+
+func (p *recordingProvider) Complete(_ context.Context, req chat.Request) (chat.Response, error) {
+	p.request = req
+	return chat.Response{Model: req.Model}, nil
+}
+func (*recordingProvider) Stream(context.Context, chat.Request) (chat.Stream, error) {
+	panic("not used")
+}
+
 func serviceFixture(root context.Context, timeout time.Duration) *service.Service {
 	return service.New(root, map[string]config.Model{"default": {Provider: "primary", UpstreamModel: "real", MaxOutputTokens: 100}}, map[string]chat.Provider{"primary": waitingProvider{}}, 1, timeout)
 }
@@ -38,6 +48,37 @@ func TestModelCapabilities(t *testing.T) {
 			session.Close()
 			t.Fatal("unsupported capability or invalid request accepted")
 		}
+	}
+}
+
+func TestUnconfiguredModelUsesOpenAIDefaultProvider(t *testing.T) {
+	provider := &recordingProvider{}
+	s := service.New(context.Background(), map[string]config.Model{
+		"default": {Provider: "openai", UpstreamModel: "configured-model", SupportsStream: true},
+	}, map[string]chat.Provider{"openai": provider}, 1, time.Second)
+	req := chat.Request{Model: "gpt-6-luna", Messages: []chat.Message{{Role: "user", Content: "hello"}}}
+	session, err := s.Open(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	response, err := session.Complete()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.request.Model != "gpt-6-luna" || session.Alias != "gpt-6-luna" || response.Model != "gpt-6-luna" {
+		t.Fatalf("request model was not forwarded and echoed: upstream=%q alias=%q response=%q", provider.request.Model, session.Alias, response.Model)
+	}
+	if session.MetricModel != "default" || session.ProviderName != "openai" {
+		t.Fatalf("unexpected observability routing labels: model=%q provider=%q", session.MetricModel, session.ProviderName)
+	}
+}
+
+func TestUnconfiguredModelRequiresOpenAIDefault(t *testing.T) {
+	s := serviceFixture(context.Background(), time.Second)
+	_, err := s.Open(context.Background(), chat.Request{Model: "gpt-6-luna", Messages: []chat.Message{{Role: "user", Content: "hello"}}})
+	if public := chat.PublicError(err); public.Status != 400 || public.Code != "unknown_model" {
+		t.Fatalf("got %v; want unknown_model", err)
 	}
 }
 

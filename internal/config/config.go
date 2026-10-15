@@ -21,7 +21,7 @@ import (
 
 const (
 	// DefaultPath 是应用唯一的运行配置入口；环境变量不会覆盖此路径或其中的值。
-	DefaultPath    = "configs/models.json"
+	DefaultPath    = "configs/models.yaml"
 	maxConfigBytes = 1 << 20
 )
 
